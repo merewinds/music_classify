@@ -1,0 +1,10 @@
+# 不把数据集提交到 git（184MB）
+adl-piano-midi/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 实验结果图片
+results/figures/
