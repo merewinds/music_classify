@@ -1,55 +1,42 @@
 """
 DTW (Dynamic Time Warping) 距离实现
+
+使用 dtaidistance 库（C 加速）进行快速 DTW 计算
+对 1D pitch 序列做对齐，支持 K-NN 分类
 """
 import numpy as np
 
+# dtaidistance 的 C 实现比纯 Python 快 100x+
+from dtaidistance import dtw
 
-def dtw(A, B):
-    """计算两条序列之间的 DTW 距离
 
-    原理：填一个 (n+1)×(m+1) 的累计距离矩阵，
-          每个格子 cost[i,j] = d(A[i], B[j]) + min(cost[i-1,j], cost[i,j-1], cost[i-1,j-1])
-          返回从 (0,0) 到 (n,m) 的最小累计距离
+def dtw_pitch(points_a, points_b):
+    """对两条旋律的 pitch 序列做 DTW 对齐
+
+    只取 pitch 维度做 1D DTW，因为：
+    1. pitch 是旋律最核心的特征
+    2. 1D DTW 比 3D DTW 快得多
+    3. 时间维度通过 DTW 的 warping 自动处理了
 
     Args:
-        A: (n, d) 数组，旋律 A 的 n 个点，每行 (t, pitch, vel)
-        B: (m, d) 数组，旋律 B 的 m 个点
+        points_a: (n, 3) 数组 (t, pitch, vel)
+        points_b: (m, 3) 数组
 
     Returns:
         float: DTW 距离
     """
-    n, m = len(A), len(B)
-    # 累计距离矩阵
-    cost = np.full((n + 1, m + 1), np.inf)
-    cost[0, 0] = 0
-
-    for i in range(1, n + 1):
-        for j in range(1, m + 1):
-            # A[i-1] 与 B[j-1] 的欧氏距离
-            d = np.sqrt(np.sum((A[i - 1] - B[j - 1]) ** 2))
-            # 累计距离 = 当前距离 + 左边/上边/左上角的最小值
-            cost[i, j] = d + min(cost[i - 1, j],     # 上方 → A 多对一
-                                 cost[i, j - 1],     # 左边 → B 多对一
-                                 cost[i - 1, j - 1]) # 左上 → 一对一
-
-    return cost[n, m]
+    a = np.ascontiguousarray(points_a[:, 1].ravel().astype(np.float64))
+    b = np.ascontiguousarray(points_b[:, 1].ravel().astype(np.float64))
+    return dtw.distance(a, b)
 
 
-def dtw_fast(A, B):
-    """优化版 DTW：只用两行数组，节省内存"""
-    n, m = len(A), len(B)
-    # 只用两行
-    prev = np.full(m + 1, np.inf)
-    curr = np.full(m + 1, np.inf)
-    prev[0] = 0
+def dtw_3d_fast(points_a, points_b):
+    """3D DTW，使用 dtaidistance 的窗口加速
 
-    for i in range(1, n + 1):
-        curr[0] = np.inf
-        for j in range(1, m + 1):
-            d = np.sqrt(np.sum((A[i - 1] - B[j - 1]) ** 2))
-            curr[j] = d + min(prev[j],       # 上方
-                              curr[j - 1],   # 左边
-                              prev[j - 1])   # 左上角
-        prev, curr = curr, prev
-
-    return prev[m]
+    将 (t, pitch, vel) 展开为一维序列，利用 DTW 的对齐能力
+    """
+    n = min(len(points_a), len(points_b))
+    # 如果太长，截断到合理长度（dtaidistance 对长序列较慢）
+    a = points_a[:n].ravel().astype(np.float64)
+    b = points_b[:n].ravel().astype(np.float64)
+    return dtw.distance(a, b, window=int(n * 0.3))
