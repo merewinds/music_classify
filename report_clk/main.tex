@@ -7,7 +7,6 @@
 \usepackage{booktabs}
 \usepackage{array}
 \usepackage{multirow}
-\usepackage{longtable}
 \usepackage{threeparttable}
 \usepackage{float}
 \usepackage{flafter}
@@ -25,13 +24,13 @@
   linkcolor=black,
   citecolor=black,
   urlcolor=blue,
-  pdftitle={基于Hausdorff距离的音乐旋律线几何相似性研究}
+  pdftitle={基于稳健Hausdorff距离与多特征融合的音乐旋律线几何建模}
 }
 
 \pagestyle{plain}
 \setlength{\parindent}{2em}
 \setlength{\parskip}{0pt}
-\linespread{1.18}
+\linespread{1.28}
 \setlength{\textfloatsep}{8pt plus 2pt minus 2pt}
 \setlength{\floatsep}{7pt plus 2pt minus 2pt}
 \setlength{\intextsep}{7pt plus 2pt minus 2pt}
@@ -51,7 +50,7 @@
   subsubsection={format=\heiti\zihao{-4},beforeskip=0.6ex,afterskip=0.3ex}
 }
 \captionsetup{font=small,labelfont=bf,skip=4pt}
-\renewcommand{\arraystretch}{1.12}
+\renewcommand{\arraystretch}{1.14}
 \setlist{nosep,leftmargin=2.2em}
 \setlist[enumerate]{topsep=3pt,itemsep=2pt,parsep=0pt}
 \setlist[itemize]{topsep=3pt,itemsep=1pt,parsep=0pt}
@@ -73,196 +72,202 @@
 \definecolor{papergold}{HTML}{D9A441}
 \definecolor{paperlight}{HTML}{F3F6FA}
 
-\begin{document}
+\input{generated_results.tex}
 
+\begin{document}
 \pagenumbering{arabic}
 \thispagestyle{plain}
 
 \begin{center}
-  {\heiti\zihao{2} 基于 Hausdorff 距离的音乐旋律线\\[0.18em]
-  几何相似性研究\par}
+  {\heiti\zihao{2} 基于稳健 Hausdorff 距离与多特征融合的\\[0.18em]
+  音乐旋律线几何建模\par}
   \vspace{0.3em}
-  {\kaishu\zihao{-4}——从三维曲线度量到音乐曲风区分\par}
+  {\kaishu\zihao{-4}——从三维曲线相似性到可信曲风区分\par}
   \vspace{0.75em}
   {\heiti\zihao{3} 摘\quad 要}
 \end{center}
 
-本文研究如何把离散 MIDI 音符转化为可比较的三维旋律曲线，并用
-Hausdorff 距离量化曲线的几何相似性，进而检验该度量区分音乐曲风的有效性。
+本文研究如何将多声部钢琴 MIDI 转化为可比较的三维旋律曲线，如何用
+Hausdorff 距离度量曲线几何相似性，以及这种几何信息对音乐曲风区分究竟具有
+多大作用。围绕表示、度量和验证三个层次，本文建立了一套可复现且主动防范
+数据泄漏的建模流程。
 
-\textbf{针对问题一，}本文以 note-on 时刻、MIDI 音高和力度构造
-“时间--音高--力度”点序列，采用最高音 skyline 提取主旋律；将整曲时间映射到
-$[0,1]$ 并均匀重采样，再对音高作中位数中心化、对力度作加权缩放，
-从而得到近似移调不变且量纲可解释的三维旋律线。
+\textbf{针对旋律表示问题，}本文从 note-on 事件中提取同一时刻的最高音
+skyline，以归一化时间相位、相对中位音高和加权力度构造三维旋律线。为控制
+同曲不同版本造成的泄漏，进一步以规范化曲名、文件 SHA-256 和移调、速度近似
+不变的旋律序列指纹构造重复关系的并集连通分量。在 \RawFileCount 个候选文件中
+识别并排除 \CrossGenreGroupCount 个跨曲风冲突组，最终从 Classical、Jazz、
+Rock、Blues、Electronic 五类各抽取 \PerGenreCount 首，共 \SampleCount 首独立
+作品。
 
-\textbf{针对问题二，}针对 max-Hausdorff 易被单个异常音符主导的问题，依次建立
-95\% 分位 Hausdorff 和 Modified Hausdorff Distance（MHD），并提出由重复内层
-交叉验证联合选择重采样点数 $N$、力度权重 $w_v$ 与近邻数 $K$ 的多参数 MHD。
-合成扰动实验表明，
-max-Hausdorff 随单点异常幅度快速增长，而 MHD 仅缓慢变化，验证了改进距离的
-稳健性。
+\textbf{针对距离稳健性问题，}本文比较 max-Hausdorff、95\% 分位 Hausdorff
+与 Modified Hausdorff Distance（MHD），并将重采样点数、力度权重和近邻数置于
+重复内层交叉验证中联合选择。单点扰动实验表明，max-Hausdorff 会被局部异常迅速
+主导，而 MHD 仅缓慢变化。真实数据中同类与异类 MHD 均值分别为
+\WithinMHD 和 \BetweenMHD，均值差为 \MHDGap；\PermutationCount 次组级置换
+检验得到 $p=\PermutationP$，但配对 AUC 仅为 \PairAUC，说明几何差异具有统计
+证据，却存在较强分布重叠。
 
-\textbf{针对问题三，}从 ADL Piano MIDI 数据集中均衡抽取 Classical、Jazz、
-Rock、Blues、Electronic 五类各 80 首，共 400 首。为避免同曲不同版本造成
-数据泄漏，先剔除 68 个跨曲风同名组，再从每个规范化曲名组只抽取一个版本，
-形成 400 个独立曲名组，并实施嵌套分组五折交叉验证。固定权重 MHD 的准确率为
-$38.00\%\pm5.77\%$；多参数 MHD 提升至 $42.00\%\pm6.16\%$。同类与异类
-MHD 均值分别为 0.3192 和 0.3541，1999 次组级置换检验 $p=0.0005$；但配对
-AUC 仅为 0.5759，
-说明距离差异显著而效应量有限。作为多特征能力对照，随机森林达到
-$53.75\%\pm7.50\%$。进一步改变外层随机种子重复五次，多参数 MHD 与随机森林
-的平均准确率分别为 40.25\% 和 53.90\%，表明模型排序具有稳定性。
+\textbf{针对曲风区分问题，}本文在统一的嵌套分组五折框架下设置相位对齐轨迹
+RMSE、多变量 DTW、逻辑回归和随机森林等对照，并建立 MHD--随机森林概率融合。
+主要几何模型多参数 MHD 的折外准确率为 \TunedMHDAcc\%
+（95\% CI：\TunedMHDLow\%--\TunedMHDHigh\%）；随机森林达到 \RFAcc\%
+（\RFLow\%--\RFHigh\%）；融合模型为 \FusionAcc\%
+（\FusionLow\%--\FusionHigh\%）。五组外层随机种子下三者平均准确率分别为
+\RepeatedMHDAcc\%、\RepeatedRFAcc\% 和 \RepeatedFusionAcc\%。融合未显著优于
+随机森林（Holm 校正 $p=\RFvsFusionHolmP$），表明几何距离与描述符虽存在局部
+互补，但不足以稳定转化为额外分类收益。
 
-综上，Hausdorff 距离族能够提供可解释、可检验的旋律几何相似性，并具有高于
-随机水平的曲风区分能力；但单一曲线距离不足以完整表征曲风，宜作为融合节奏、
-音级、力度与和声信息的多特征系统中的几何先验。
+综上，稳健 Hausdorff 距离能够提供可解释、可检验的旋律几何相似性，并具有明显
+高于随机水平的曲风信息；但其单独判别能力有限。对本题而言，Hausdorff 更适合作为
+解释旋律形状的几何模型和多特征系统的辅助证据，而非独立的高精度曲风分类器。
 
-\noindent\textbf{关键词：}旋律线；Hausdorff 距离；Modified Hausdorff；
-MIDI；曲风分类；嵌套分组交叉验证
+\noindent\textbf{关键词：}旋律线；Modified Hausdorff；MIDI；数据泄漏；
+嵌套分组交叉验证；曲风分类；模型融合
 
 \clearpage
 
 \section{问题重述}
 
 题目要求把一段音乐抽象为离散音符序列，每个音符包含时间、音高和音量信息；
-再将音符视为三维空间点并连接为旋律曲线；最后研究 Hausdorff 距离能否量化
-旋律线的几何相似性，以及这种度量对区分音乐曲风是否有效。
+将相邻音符视为三维空间中的点并连接为旋律曲线；在此基础上研究 Hausdorff 距离
+能否量化不同旋律线之间的几何相似性，并讨论这种度量对区分音乐曲风是否有效。
 
-围绕这一要求，本文回答以下三个递进问题：
-\begin{enumerate}[label=\arabic*.]
-  \item 如何从多声部钢琴 MIDI 中稳定提取一条可比较的三维主旋律线？
-  \item 原始 Hausdorff 距离对移调、量纲和离群音符是否稳健，如何改进？
-  \item 在严格避免同曲泄漏的条件下，几何距离能够达到怎样的曲风区分能力？
-\end{enumerate}
+这一任务不能简化为一次距离计算。首先，多声部 MIDI 同一时刻可能包含多个音符，
+不同作品的时长、速度、调性和力度范围也不同，因此必须定义统一的旋律表示。
+其次，标准 Hausdorff 距离由最坏匹配点决定，可能过度响应装饰音或解析误差，
+需要构造稳健变体并设置针对性检验。最后，曲风标签与作品版本并非独立；如果同一
+作品的不同版本分别进入训练集和测试集，所得精度会严重偏高。因此本文将题目转化为
+以下三个递进问题：如何构造可比较的三维旋律线；如何建立稳健且保留音乐解释的距离；
+如何在严格防泄漏的条件下评价这种距离的实际区分能力。
 
-\section{问题分析}
+\section{问题分析与总体思路}
 
-该问题表面上是距离计算，实质上同时包含表示、度量和验证三个层次。
+\subsection{表示、度量与验证的三层矛盾}
 
-\textbf{表示层：}不同 MIDI 的长度、速度、调性和声部数量均不同。若直接对
-原始音符点计算欧氏距离，则一个八度的音高差、一个拍的时间差和 1 个力度单位
-无法直接比较；若对每首曲子分别做三维 Min--Max 归一化，又会抹去音域和力度
-动态等可能有用的信息。
+在表示层，若直接使用原始时间、MIDI 音高和力度，三个坐标的量纲无法比较；若对每首
+作品分别执行三维 Min--Max 归一化，又会消除音域和力度动态等可能具有曲风意义的
+信息。本文因此只将时间映射为相位，对音高做移调不变的中心化，并为力度设置显式权重。
 
-\textbf{度量层：}标准 Hausdorff 距离由最坏匹配点决定，对装饰音、录制误差和
-异常强音高度敏感；同时它把曲线当作点集，弱化了时间顺序。因而需要引入分位数
-和均值型改进，并用 DTW 作为时序对照。
+在度量层，max-Hausdorff 能描述两集合最坏匹配点的偏离，却忽视曲线点的顺序并对
+单点异常敏感。本文沿两条路径建立对照：一条以 Q95-HD 和 MHD 改善点集距离的稳健性；
+另一条以相位对齐轨迹 RMSE 和多变量 DTW 恢复不同程度的顺序约束。这样可以判断
+性能差异来自稳健聚合、时序对齐还是全局描述符。
 
-\textbf{验证层：}ADL 数据中存在同一标题的不同版本，若随机逐文件划分，模型
-可能在训练集中看到测试作品的另一个版本，导致精度虚高。因此本文采用曲名分组
-交叉验证，并把参数选择放入内层交叉验证，使外层测试集只用于最终评估。
+在验证层，题目的目标是评价未见作品的曲风，而不是识别同一作品的另一个版本。
+因此所有重复作品必须在划分前归组，所有参数必须只在外层训练数据内部选择。本文
+预先指定多参数 MHD 为主要几何模型，其余距离为对照，避免在同一测试结果中事后挑选
+“最好 Hausdorff 变体”再将其当作预设结论。
 
 \begin{figure}[!htbp]
   \centering
-  \includegraphics[width=0.98\textwidth]{workflow_gpt_image2.png}
-  \caption{本文总体建模与验证流程}
-  \label{fig:workflow}
+  \includegraphics[width=0.99\textwidth]{method_taxonomy_cn.png}
+  \caption{本文从旋律表示、距离模型、分类融合到可信评价的方法谱系}
+  \label{fig:taxonomy}
 \end{figure}
 
-\subsection{建模难点与本文创新}
+\subsection{建模流程与主要贡献}
 
-优秀的相似性模型不仅要“算得出距离”，还要保证表示合理、验证无泄漏、结论不过度
-外推。本文围绕这三点形成表 \ref{tab:innovation} 所示的改进链条。
-
-\begin{table}[!htbp]
-  \centering
-  \caption{核心难点、解决策略与建模贡献}
-  \label{tab:innovation}
-  \small
-  \begin{tabular}{p{0.21\textwidth}p{0.38\textwidth}p{0.31\textwidth}}
-    \toprule
-    核心难点 & 解决策略 & 建模贡献\\
-    \midrule
-    多声部 MIDI 难以直接比较 &
-    skyline 主旋律提取、时间相位重采样与相对音高表示 &
-    建立统一、可解释的三维旋律曲线\\
-    极端音符主导 max-HD &
-    引入 Q95-HD 与均值型 MHD，并设置单点扰动实验 &
-    将“最坏点差异”改进为稳健的整体形状差异\\
-    同曲不同版本造成数据泄漏 &
-    跨曲风同名组剔除，规范化曲名分组，嵌套交叉验证 &
-    外层结果不含同曲泄漏和测试集调参偏差\\
-    显著性不等于实用区分力 &
-    同时报告置换检验、配对 AUC、分类精度与 MDS &
-    从统计证据和实际效应两方面评价有效性\\
-    \bottomrule
-  \end{tabular}
-\end{table}
+图 \ref{fig:taxonomy} 概括了完整方法链。相较于只计算一张距离矩阵，本文的主要
+改进体现在四个方面。第一，采用曲名、字节哈希和旋律指纹的并集分组，以更保守的
+方式攻击近重复泄漏。第二，在 Hausdorff 主线内部建立从最大值、分位数到均值型
+聚合的稳健性比较，并将表示参数纳入嵌套选择。第三，设置顺序距离、线性描述符模型、
+非线性描述符模型和概率融合，明确几何信息的能力边界。第四，同时报告置信区间、
+配对检验、重复分折、参数敏感性和特征消融，使“显著”“稳定”和“实用”不再混为
+同一概念。
 
 \section{模型假设}
 
 \begin{enumerate}[label=\arabic*.]
   \item MIDI 的 note-on 时刻、音高和力度能够近似表示演奏中的旋律事件。
-  \item 钢琴编配中同一时刻的最高音通常承载主旋律，因此采用最高音声部
-  （skyline）作为主旋律近似。
-  \item 同一作品的不同演奏版本不应跨越训练集和测试集；规范化曲名相同的文件
-  视为同一分组。
-  \item 对曲风而言，绝对调性的重要性低于相对音程结构，因此主模型对音高做
-  中位数中心化以获得近似移调不变性。
-  \item 五类样本均衡抽取，故随机分类基线为 $1/5=20\%$。
+  \item 钢琴编配中同一时刻的最高音通常承载主旋律，故以 skyline 作为主旋律近似。
+  \item 同一作品的不同文件版本不能跨越训练集和测试集；标题、字节内容或标准化旋律
+  指纹相同的文件视为同一重复连通组。
+  \item 对本题曲风比较而言，相对音程结构比绝对调性更重要，故主模型对音高做中位数
+  中心化以获得近似移调不变性。
+  \item 五类样本均衡抽取，因此随机分类基线为 $1/5=20\%$。
 \end{enumerate}
 
 \section{符号说明}
 
-\begin{table}[!htbp]
+\begin{table}[H]
   \centering
-  \caption{主要符号}
-  \begin{tabular}{cl}
+  \small
+  \caption{主要符号及含义}
+  \label{tab:symbol}
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{
+    c >{\raggedright\arraybackslash}p{0.31\textwidth}
+    c >{\raggedright\arraybackslash}p{0.31\textwidth}
+  }
     \toprule
-    符号 & 含义\\
+    符号 & 含义 & 符号 & 含义\\
     \midrule
-    $M$ & 一首音乐提取出的旋律线点集\\
-    $\tau_i,p_i,v_i$ & 第 $i$ 个音符的时间、MIDI 音高和力度\\
-    $\bm{x}_i$ & 标准化后的三维旋律点\\
-    $h(A,B)$ & 从点集 $A$ 到 $B$ 的有向 Hausdorff 距离\\
+    $M$ & 一首作品的旋律线点集 &
+    $h(A,B)$ & 从 $A$ 到 $B$ 的有向 Hausdorff 距离\\
+    $\tau_i,p_i,v_i$ & 第 $i$ 个音符的时间、音高和力度 &
     $H(A,B)$ & 双向 max-Hausdorff 距离\\
+    $\bm{x}_i$ & 标准化后的三维旋律点 &
     $\QHD(A,B)$ & 95\% 分位 Hausdorff 距离\\
-    $\MHD(A,B)$ & Modified Hausdorff Distance\\
+    $\MHD(A,B)$ & Modified Hausdorff Distance &
     $N$ & 旋律曲线的均匀重采样点数\\
-    $w_v$ & 音量维权重\\
-    $K$ & K-NN 的近邻数\\
+    $w_v$ & 力度维权重 &
+    $K$ & 距离 K-NN 的近邻数\\
+    $\alpha$ & 融合中随机森林概率权重 &
+    -- & --\\
     \bottomrule
   \end{tabular}
 \end{table}
 
-\section{数据预处理与旋律线构造}
+\section{数据审计与旋律表示}
 
-\subsection{数据抽样与防泄漏处理}
+\subsection{三重指纹去重与平衡抽样}
 
-ADL Piano MIDI 数据集\cite{adl}包含 18 个目录、共 11076 首钢琴 MIDI。本文选择
-Classical、Jazz、Rock、Blues、Electronic 五类。先把文件名转为小写，去除标点、
-括号中的版本说明以及明确的 ``take/live/remaster/version'' 后缀，同时保留
-``Sinfonia 5'' 一类作品编号，得到规范化曲名。若同一规范化曲名出现在多个曲风
-目录，则将其全部排除，共排除 68 个跨曲风标题组；随后以随机种子 2026 打乱
-候选曲名组，每组只选取一个可成功解析的版本，每类取 80 首，最终得到 400 首、
-400 个独立曲名组。
+ADL Piano MIDI 数据集包含多个宽泛曲风目录。本文只使用 Classical、Jazz、Rock、
+Blues 和 Electronic 五类，共扫描 \RawFileCount 个 MIDI 文件。首先对文件名执行
+Unicode 规范化、大小写折叠和标点清理，删除 live、remaster、version、take 等
+明确版本后缀，同时保留 ``Sinfonia 5'' 一类作品编号，得到规范化曲名。
 
-这一处理比简单取文件夹中按字母排序的前若干首更可靠：它避免了字母顺序偏差，
-也防止 ``take 1/take 2''、``live/album version'' 等近重复作品造成测试泄漏。
+仅依赖文件名仍可能漏掉改名文件，因此本文增加两种内容指纹。SHA-256 用于识别
+字节完全相同的重新复制文件；旋律指纹则先提取 skyline，将起音时间归一化到
+$[0,1]$，将音高减去中位数，再对量化后的相位--相对音高序列计算哈希。该指纹忽略
+MIDI 元数据、整体速度和移调，因此能够发现部分文件名不同但旋律实质相同的版本。
+三种关系只要有一种成立，就通过并查集连接为同一重复组；若一个连通组跨越多个曲风，
+则整组排除。数据中共识别 \MelodyDuplicateSetCount 个旋律指纹重复集合、
+\CrossGenreGroupCount 个跨曲风冲突组，涉及 \CrossGenreFileCount 个文件。
 
-\subsection{主旋律提取}
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=0.96\textwidth]{data_funnel_cn.png}
+  \caption{原始文件、去重后独立组与最终平衡样本的数据筛选漏斗}
+  \label{fig:funnel}
+\end{figure}
+
+如图 \ref{fig:funnel} 所示，去重后样本容量最受 Blues 类约束。程序以随机种子
+2026 打乱各类候选组，在每个组中随机尝试一个可解析版本；目标设为每类 100 首，
+五类均达到目标，最终获得 \SampleCount 首作品和 \SampleCount 个独立分组。若任一
+曲风不足 100 个可用组，代码会自动退回五类共同可用上限，而不会通过重复抽样凑数。
+
+\subsection{主旋律提取与时间重采样}
 
 本文自行解析标准 MIDI 文件中的变长时间编码、运行状态和 note-on 事件，不依赖
-额外 MIDI 库。对每个起始时刻 $\tau$，若同时出现多个音符，保留音高最大的音符：
+额外 MIDI 库。对每个起始时刻 $\tau$，若同时出现多个音符，则先选音高最高者；
+若最高音并列，再保留力度较大的音符：
 \begin{equation}
   (p_\tau,v_\tau)
-  =\arg\max_{(p,v)\in C_\tau} (p,v),
+  =\arg\max_{(p,v)\in C_\tau}(p,v),
 \end{equation}
-其中按音高优先、力度次优作字典序比较；因此最高音并列时保留力度更大的音符。
-$C_\tau$ 为时刻 $\tau$ 的同时发声音符集合。少于 32 个主旋律起音的文件被视为
-信息不足并跳过。
+其中 $C_\tau$ 表示时刻 $\tau$ 的同时发声音符集合。少于 32 个 skyline 起音的
+文件被视为信息不足并记录失败原因。
 
-\subsection{时间均匀重采样}
-
-将相邻旋律点用线段连接。设首末音时刻为 $\tau_{\min},\tau_{\max}$，定义归一化
-相位
+设首末音时刻为 $\tau_{\min}$ 与 $\tau_{\max}$，定义归一化时间相位
 \begin{equation}
-  t_i=\frac{\tau_i-\tau_{\min}}{\tau_{\max}-\tau_{\min}}\in[0,1].
+  t_i=\frac{\tau_i-\tau_{\min}}
+  {\tau_{\max}-\tau_{\min}}\in[0,1].
 \end{equation}
-在 $[0,1]$ 上均匀取 $N$ 个采样点，对音高和力度作分段线性插值。固定基准使用
-$N=96$，最终模型在 $N\in\{48,72,96\}$ 中由内层验证选择。本文不采用原有
-的三维弧长重采样，因为弧长会被音高和力度量纲主导，使“采样位置”和“距离权重”
-相互耦合。图 \ref{fig:curves} 给出五类样本的三维曲线示例。
+在 $[0,1]$ 上均匀取 $N$ 个采样点，对音高和力度作分段线性插值。该设计不同于
+三维弧长重采样：弧长会被音高和力度尺度共同影响，使“采样位置”和“距离权重”
+发生耦合；时间均匀采样则将离散密度和坐标权重分离，便于解释敏感性结果。
 
 \begin{figure}[!htbp]
   \centering
@@ -271,10 +276,9 @@ $N=96$，最终模型在 $N\in\{48,72,96\}$ 中由内层验证选择。本文不
   \label{fig:curves}
 \end{figure}
 
-\subsection{相对音高与加权三维表示}
+\subsection{相对音高表示与统计描述符}
 
-为近似消除移调影响，将音高相对其中位数表示，并按八度缩放；力度以 64 为中心、
-32 为尺度。第 $i$ 个三维点写为
+对第 $i$ 个重采样点，定义
 \begin{equation}
   \bm{x}_i(w_v)=
   \left(
@@ -284,40 +288,45 @@ $N=96$，最终模型在 $N\in\{48,72,96\}$ 中由内层验证选择。本文不
   \right)\in\R^3 .
   \label{eq:representation}
 \end{equation}
-这样，时间相位 1、一个八度音高差和 $32/w_v$ 个力度单位处于可解释的尺度上。
+其中一个八度对应音高坐标 1，力度以 64 为中心并按 32 缩放。主模型的候选力度
+权重集合为
+\begin{equation}
+  w_v\in\{0,0.1,0.25,0.5\},
+\end{equation}
+其中 $w_v=0$ 对应忽略力度。
 
-\section{距离模型的建立}
+为判断点集几何之外的信息量，本文同时提取 55 个可解释描述符，分为尺度与长度、
+音高统计、音程与轮廓、力度动态、节奏、音级与调性六组。除原有时长、音域、音程、
+起音间隔和 12 维音级直方图外，还加入音程熵、旋律轮廓斜率、音高自相关、力度变化、
+节奏规则度和音高--力度相关等特征。描述符只由单首作品计算，不使用全数据标签或
+测试折统计量；逻辑回归的标准化器也仅在各训练折拟合。
 
-\subsection{标准 Hausdorff 距离}
+\section{距离模型与分类模型}
 
-对两条旋律线点集\cite{hausdorff} $A=\{\bm a_i\}_{i=1}^{m}$、
-$B=\{\bm b_j\}_{j=1}^{n}$，定义有向距离
+\subsection{Hausdorff 距离族}
+
+对两条旋律线点集 $A=\{\bm a_i\}_{i=1}^{m}$ 与
+$B=\{\bm b_j\}_{j=1}^{n}$，有向 Hausdorff 距离为
 \begin{equation}
   h(A,B)=\max_{\bm a\in A}\min_{\bm b\in B}
   \|\bm a-\bm b\|_2,
 \end{equation}
-双向 Hausdorff 距离为
+双向距离定义为
 \begin{equation}
   H(A,B)=\max\{h(A,B),h(B,A)\}.
   \label{eq:hd}
 \end{equation}
-本文用 KD-tree 搜索最近点，使单次有向匹配由朴素的 $O(mn)$ 降为近似
+本文使用 KD-tree 搜索最近点，使单次有向匹配由朴素 $O(mn)$ 降为近似
 $O(m\log n)$。
 
-\subsection{95\% 分位 Hausdorff}
-
-为减少单个异常音符对最大值的控制，将有向最近距离集合的最大值替换为
-95\% 分位数：
+为降低极端点影响，将有向最近距离集合的最大值替换为 95\% 分位数：
 \begin{equation}
   \QHD(A,B)=\max\left\{
   Q_{0.95}\!\left(\min_{\bm b\in B}\|\bm a-\bm b\|_2\right),
   Q_{0.95}\!\left(\min_{\bm a\in A}\|\bm b-\bm a\|_2\right)
   \right\}.
 \end{equation}
-
-\subsection{Modified Hausdorff Distance}
-
-进一步采用 Dubuisson--Jain 型均值思想\cite{dubuisson}，把最坏点改为整体平均偏差：
+进一步采用 Dubuisson--Jain 型均值思想 \cite{dubuisson}：
 \begin{align}
   h_{\mathrm{MHD}}(A,B)
   &=\frac{1}{|A|}\sum_{\bm a\in A}
@@ -326,234 +335,386 @@ $O(m\log n)$。
   &=\max\{h_{\mathrm{MHD}}(A,B),h_{\mathrm{MHD}}(B,A)\}.
   \label{eq:mhd}
 \end{align}
-外层保留双向最大值，以防止稠密短曲线被稀疏长曲线单向“覆盖”。
+外层保留双向最大值，以避免较短或较密曲线在单向匹配中被另一条曲线完全覆盖。
 
-\subsection{嵌套多参数 MHD}
+\subsection{顺序保持距离}
 
-固定离散密度和音量权重可能不适合所有训练划分。本文令
+Hausdorff 把旋律视为点集，不要求对应点保持严格顺序。本文首先定义相位对齐轨迹
+RMSE：两曲线具有相同采样网格时，按相同相位逐点计算音高--力度欧氏差并取均方根。
+该模型严格保持顺序，但不允许局部速度变形，可作为“零时间扭曲”基线。
+
+第二个顺序模型为多变量 DTW \cite{dtw}。设两条音高--力度序列为
+$P=(\bm p_1,\ldots,\bm p_m)$ 和 $Q=(\bm q_1,\ldots,\bm q_n)$，动态规划递推为
 \begin{equation}
-  N\in\{48,72,96\},\qquad
-  w_v\in\{0,0.1,0.25,0.5\},\qquad
-  K\in\{1,3,5,7,9\},
+  D(i,j)=\|\bm p_i-\bm q_j\|_2+
+  \min\{D(i-1,j),D(i,j-1),D(i-1,j-1)\}.
 \end{equation}
-在每个外层训练集内部，以 3 个随机种子分别进行三折分组交叉验证，联合选择
+本文使用 Sakoe--Chiba 窗口限制对齐范围，并在内层联合选择
+$N\in\{36,48\}$、$w_v\in\{0,0.25,0.5\}$、窗口比例
+$r\in\{0.1,0.2\}$ 和 $K\in\{1,3,5,7,9\}$。DTW 核心使用 Numba 编译，
+在不引入专用音乐库的前提下保持可复现计算效率。
+
+\subsection{描述符分类与概率融合}
+
+距离矩阵采用 K-NN 分类。对测试样本 $x$，在训练索引中选择距离最小的 $K$ 个
+邻居，以类别票数比例作为几何模型概率。描述符侧设置两种能力对照：多项逻辑回归
+用于检验线性可分信息，随机森林 \cite{rf} 用于捕捉特征间非线性关系。逻辑回归的
+正则化参数 $C\in\{0.01,0.1,1,10\}$ 由内层选择；随机森林使用 500 棵树、
+最小叶节点样本数 2 和类别平衡权重。
+
+为检验几何和统计描述符是否互补，定义概率融合
 \begin{equation}
-  (N^\ast,w_v^\ast,K^\ast)
-  =\arg\max_{N,w_v,K}\overline{\operatorname{BAcc}}_{\mathrm{inner}}(N,w_v,K).
+  \bm{p}_{\mathrm{fusion}}(x)
+  =\alpha\bm{p}_{\mathrm{RF}}(x)
+  +(1-\alpha)\bm{p}_{\mathrm{MHD}}(x),
+  \label{eq:fusion}
 \end{equation}
-随后仅在该外层测试折上评估一次，得到无测试集调参偏差的性能估计。
+其中 $\alpha\in\{0.25,0.5,0.75\}$。在每个外层训练集内，程序对 MHD 的
+$N,w_v,K$ 和 $\alpha$ 联合评分；外层测试折在参数确定后只评估一次。该设计允许
+融合结果为正、为零或为负，不以“必须优于随机森林”为前提。
 
-\subsection{对照模型}
+\subsection{计算复杂度与模型取舍}
 
-本文设置两类对照：
-\begin{enumerate}[label=(\arabic*)]
-  \item \textbf{DTW 相对音高距离：}保留时序顺序，以 Sakoe--Chiba 窗口\cite{dtw}对齐
-  相对音高序列；
-  \item \textbf{随机森林描述符模型：}采用随机森林\cite{rf}并提取 40 个可解释特征，包括时长、音符
-  密度、音域、音程、力度、相邻起音间隔、切分比例、12 维音级直方图等。该模型
-  不属于纯几何距离，而作为融合全局统计信息后的能力对照。
-\end{enumerate}
+设样本数为 $n$，每首旋律重采样为 $N$ 个点，描述符维数为 $d$，随机森林树数为
+$T$。采用 KD-tree 后，一对旋律的 MHD 近似需要 $O(N\log N)$ 时间，完整对称距离
+矩阵需要 $O(n^2N\log N)$ 时间和 $O(n^2)$ 存储；max-HD 与 Q95-HD 具有相同量级。
+相位对齐 RMSE 的单对复杂度为 $O(N)$。带窗口比例 $r$ 的 DTW 需要
+$O(rN^2)$ 时间和 $O(rN^2)$ 动态规划空间，因此即使其采样点数较少，完整参数网格
+仍明显慢于 MHD。描述符计算近似随事件数线性增长，逻辑回归和随机森林的训练成本
+则分别受迭代次数及 $O(Tnd\log n)$ 控制。
 
-\section{模型求解与评价方案}
+本文据此采取三项工程约束：距离矩阵按表示参数缓存，避免每个交叉验证折重复计算；
+样本对在多核间并行，但参数选择和外层评估保持确定随机种子；DTW 只保留能够回答
+“局部时间扭曲是否必要”的小型网格，不为追求模型数量引入重量级依赖。
 
-\subsection{嵌套分组五折交叉验证}
+\section{模型求解与可信评价}
 
-外层采用 Stratified Group 5-Fold：尽量保持各曲风比例，同时保证相同规范化
-曲名只出现在一个折中。距离 K-NN 的 $N,w_v,K$ 在外层训练数据上通过
-3 组内层三折的平均平衡准确率确定。
-所有结果报告外层 5 个测试折的均值和样本标准差。评价指标包括准确率、平衡
-准确率、宏平均 F1 和归一化混淆矩阵。
+\subsection{嵌套分组交叉验证}
+
+外层采用带随机打乱的 Stratified Group 5-Fold，尽量保持各曲风比例，同时保证
+相同重复连通组只出现在一个折中。由于最终每个作品组只抽取一个版本，当前 500 个
+组均为单样本；保留 group 约束可以防止未来放入多个版本时验证协议悄然退化。
+
+所有可调模型均在外层训练集内部执行 3 个随机种子下的三折分组交叉验证，以平均
+平衡准确率选择参数。外层测试折不参与缩放、特征处理、参数选择或融合权重选择。
+这一嵌套结构用于控制模型选择偏差 \cite{varma,cawley}。主结果由随机种子 42 的
+五个外层折外预测合并得到；另以 11、23、42、67、101 五组外层随机种子重复完整
+流程，评价排序稳定性。
+
+\subsection{区间估计与配对检验}
+
+本文报告 Accuracy、Balanced Accuracy、Macro-F1、分曲风召回率和归一化混淆
+矩阵。对合并后的折外预测，在每个真实曲风内部有放回抽样，执行 2000 次分层
+Bootstrap \cite{efron}，取 2.5\% 和 97.5\% 分位数作为 95\% 置信区间。
+该区间反映当前样本集上的预测不确定性，不等同于跨数据集外推区间。
+
+针对主要几何模型、随机森林和融合模型，使用同一样本的正确/错误配对构造
+McNemar 精确检验 \cite{mcnemar}，并采用 Holm 逐步法 \cite{holm} 校正三组比较。
+因此模型优劣不仅由点估计判断，还要求错误样本的配对差异具有统计证据。
 
 \subsection{距离分布检验}
 
-将 400 首曲目的所有两两距离分为同曲风组与异曲风组。由于同一曲目参与多个
-配对，普通独立样本检验会夸大显著性，因此本文采用 1999 次组级标签置换检验：
-以规范化曲名组为单位随机打乱曲风标签，重复计算“异类均值减同类均值”，并以
+将所有两两 MHD 分为同曲风和异曲风。由于同一作品参与多个配对，普通独立样本检验
+会夸大有效样本量。本文以作品组为单位随机打乱曲风标签，重复 \PermutationCount 次，
+每次计算
 \begin{equation}
-  p=\frac{1+\#\{\Delta_{\mathrm{perm}}\geq\Delta_{\mathrm{obs}}\}}{1999+1}
+  \Delta=\overline{d}_{\mathrm{between}}
+  -\overline{d}_{\mathrm{within}},
 \end{equation}
-估计显著性。同时报告配对 AUC，衡量随机抽取一对同类和一对异类时，前者距离
-更小的概率。
+并使用加一修正
+\begin{equation}
+  p=\frac{1+\#\{\Delta_{\mathrm{perm}}\geq\Delta_{\mathrm{obs}}\}}
+  {\PermutationCount+1}.
+\end{equation}
+同时报告配对 AUC，即随机抽取一对同类作品和一对异类作品时，同类距离更小的概率。
+
+\subsection{复现与实验溯源}
+
+每次运行均记录流水线版本、命令行参数、随机种子、Git 提交和工作区状态、Python 与
+依赖版本、选中数据文件和旋律指纹的组合哈希、运行时间、指标文件以及全部产物
+SHA-256。距离矩阵和样本缓存文件名绑定版本 \PipelineVersion；两次相同配置的完整
+运行生成相同确定性签名，从而验证缓存复用未改变结果。
 
 \section{模型检验与实验结果}
 
 \begin{figure}[!htbp]
   \centering
   \includegraphics[width=0.98\textwidth]{results_dashboard_cn.png}
-  \caption{实验规模与核心结果概览}
+  \caption{最终实验规模与三类主要模型结果概览}
   \label{fig:dashboard}
 \end{figure}
 
-\subsection{离群点稳健性}
+\subsection{Hausdorff 距离的离群点稳健性}
 
-在合成曲线上只扰动一个采样点。图 \ref{fig:synthetic} 显示 max-Hausdorff
-随异常幅度迅速增大；95\% 分位距离几乎不受单点影响；MHD 仅缓慢增加。这说明
-原始最大值确实容易被单个装饰音或解析误差主导。
+在合成正弦旋律线上只扰动一个采样点，逐步增大音高偏移。图
+\ref{fig:synthetic} 显示 \texttt{max-HD} 随异常幅度近似线性上升；Q95-HD 几乎
+不受单点影响；MHD 仅缓慢增加。由此可见，最大值型距离确实可能被单个装饰音、
+转录错误或局部高音主导，而分位数和均值型聚合能够提供更稳定的整体形状度量。
 
 \begin{figure}[!htbp]
   \centering
   \includegraphics[width=0.82\textwidth]{synthetic_robustness_cn.png}
-  \caption{单点离群扰动下三种 Hausdorff 族距离的响应}
+  \caption{单点离群扰动下三种 Hausdorff 距离的响应}
   \label{fig:synthetic}
 \end{figure}
 
-\subsection{同类与异类距离分布}
+\subsection{同类与异类距离证据}
 
-固定 $N=96,w_v=0.25$ 时，同类 MHD 均值为 0.3192、中位数为 0.2744；异类均值为
-0.3541、中位数为 0.3173，均值差为 0.0349。组级置换检验 $p=0.0005$，拒绝“曲风
-标签与距离结构无关”的原假设。配对 AUC 为 0.5759，虽高于 0.5，但仍说明两类
-分布高度重叠。
+固定 $N=96,w_v=0.25$ 时，同曲风 MHD 均值为 \WithinMHD，异曲风均值为
+\BetweenMHD，差值为 \MHDGap。置换检验得到 $p=\PermutationP$，说明曲风标签
+与距离结构并非完全无关。然而配对 AUC 仅为 \PairAUC，图 \ref{fig:distribution}
+中两分布仍大量重叠。因此“同类平均更近”是有证据的总体趋势，但不足以保证单对
+作品能够可靠区分。
 
 \begin{figure}[!htbp]
   \centering
   \includegraphics[width=0.98\textwidth]{distance_distribution_cn.png}
-  \caption{同曲风与异曲风的 MHD 分布}
+  \caption{同曲风与异曲风旋律的 MHD 分布及效应量}
   \label{fig:distribution}
 \end{figure}
 
-曲风平均距离矩阵见图 \ref{fig:heatmap}。Jazz 与 Blues 的类内均值最低，
-分别为 0.267 和 0.269；Electronic 类内均值最高（0.371），表明其内部旋律
-形态最分散。Classical--Jazz 的平均距离最大（0.407），而 Rock--Blues
-较近（0.316），与后续混淆关系基本一致。
-
 \begin{figure}[!htbp]
   \centering
-  \includegraphics[width=0.62\textwidth]{genre_distance_heatmap_cn.png}
-  \caption{五类曲风的平均 MHD 矩阵}
-  \label{fig:heatmap}
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{genre_distance_heatmap_cn.png}
+    \caption{曲风平均距离矩阵}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{mds_mhd_cn.png}
+    \caption{距离矩阵的二维 MDS 投影}
+  \end{subfigure}
+  \caption{MHD 空间中的曲风关系与整体重叠}
+  \label{fig:geometry}
 \end{figure}
 
-\subsection{分类性能比较}
+图 \ref{fig:geometry} 显示不同曲风存在局部结构，但五类分布并未形成清晰分离的
+簇。该结果与 AUC 一致：Hausdorff 空间包含弱曲风信息，却不具备直接线性分离结构。
+它更适合解释“旋律形状为何接近”，而不是单独承担高精度分类。
+
+\subsection{分类模型统一比较}
 
 \begin{table}[!htbp]
   \centering
   \begin{threeparttable}
-  \caption{不同距离与分类模型的分组五折结果}
+  \caption{统一嵌套分组验证下的模型表现}
   \label{tab:model}
   \small
-  \setlength{\tabcolsep}{4.5pt}
+  \setlength{\tabcolsep}{3.8pt}
   \begin{tabular}{lccc}
     \toprule
-    方法 & 准确率（均值$\pm$标准差） & 总体 Macro-F1 & 说明\\
+    方法 & 折外准确率（95\% CI） & Macro-F1 & 模型角色\\
     \midrule
-    HD，逐曲 Min--Max & $33.25\%\pm2.88\%$ & 0.306 & 原始基线\\
-    HD，相对音高 TP & $32.75\%\pm5.03\%$ & 0.327 & 不使用音量\\
-    HD，相对音高 TPV & $32.00\%\pm6.94\%$ & 0.316 & $w_v=0.25$\\
-    95\% 分位 HD & $33.75\%\pm3.85\%$ & 0.326 & 抑制极端点\\
-    MHD & $38.00\%\pm5.77\%$ & 0.370 & 整体最近距离均值\\
-    DTW，相对音高 & $28.50\%\pm2.71\%$ & 0.291 & 时序对照\\
+    HD，逐曲 Min--Max &
+    \HDLocalAcc\%（\HDLocalLow--\HDLocalHigh） & \HDLocalFOne & 原始基线\\
+    HD，相对音高 TPV &
+    \HDTPVAcc\%（\HDTPVLow--\HDTPVHigh） & \HDTPVFOne & 三维最大值\\
+    95\% 分位 HD &
+    \QHDAcc\%（\QHDLow--\QHDHigh） & \QHDFOne & 稳健分位数\\
+    固定 MHD &
+    \FixedMHDAcc\%（\FixedMHDLow--\FixedMHDHigh） & \FixedMHDFOne & 整体均值\\
+    相位对齐轨迹 RMSE &
+    \PhaseRMSEAcc\%（\PhaseRMSELow--\PhaseRMSEHigh） & \PhaseRMSEFOne & 严格顺序基线\\
     \rowcolor{papergold!16}
-    \textbf{多参数 MHD（嵌套）} & $\bm{42.00\%\pm6.16\%}$ & \textbf{0.410} & 内层选 $N,w_v,K$\\
+    \textbf{多参数 MHD（嵌套）} &
+    \textbf{\TunedMHDAcc\%（\TunedMHDLow--\TunedMHDHigh）} &
+    \textbf{\TunedMHDFOne} & 主要几何模型\\
+    多变量 DTW（嵌套） &
+    \DTWAcc\%（\DTWLow--\DTWHigh） & \DTWFOne & 局部时序对齐\\
+    多项逻辑回归 &
+    \LogisticAcc\%（\LogisticLow--\LogisticHigh） & \LogisticFOne & 线性描述符\\
     \rowcolor{paperblue!9}
-    随机森林描述符 & $53.75\%\pm7.50\%$ & 0.541 & 多特征能力对照\\
+    随机森林描述符 &
+    \RFAcc\%（\RFLow--\RFHigh） & \RFFOne & 非线性能力对照\\
+    MHD--RF 概率融合 &
+    \FusionAcc\%（\FusionLow--\FusionHigh） & \FusionFOne & 联合模型\\
     \midrule
     随机猜测 & 20.00\% & 0.200 & 五类均衡\\
     \bottomrule
   \end{tabular}
   \begin{tablenotes}
     \small
-    \item 注：准确率标准差为五个外层测试折的样本标准差；总体 Macro-F1 由
-    400 个外层折外预测合并计算。
+    \item 注：区间为 2000 次分层 Bootstrap 的 95\% CI；所有数值均来自相同的
+    外层折外预测。多参数 MHD 为预先指定的主要几何模型。
   \end{tablenotes}
   \end{threeparttable}
 \end{table}
 
-从表 \ref{tab:model} 可得：
-\begin{enumerate}[label=\arabic*.]
-  \item 所有 Hausdorff 族模型均明显高于 20\% 随机基线，说明三维旋律几何
-  结构含有可利用的曲风信息。
-  \item MHD 比固定权重三维 max-Hausdorff 提升 6.0 个百分点，支持
-  “整体形状比最坏点更适合曲风区分”的判断。
-  \item 嵌套多参数 MHD 达到 42.00\%，比固定 MHD 提高 4.00 个百分点。
-  五个外层折中有四折选择 $w_v=0.5$；采样点数依次选择 96、96、48、48、72，
-  说明力度维度有信息，但不存在对所有划分都最优的单一离散密度。
-  \item 本实验中的 DTW 仅使用相对音高，未利用节奏和力度，因此低于三维 MHD；
-  这并不意味着所有 DTW 变体都弱于 Hausdorff。
-  \item 随机森林仍比最佳几何模型高 11.75 个百分点，说明曲风差异还依赖曲长、
-  节奏密度、音级分布和动态范围等全局统计，单一曲线距离不能完整表达。
-\end{enumerate}
-
 \begin{figure}[!htbp]
   \centering
   \includegraphics[width=0.98\textwidth]{model_comparison_cn.png}
-  \caption{各模型分组五折准确率比较}
+  \caption{距离模型、描述符模型与概率融合的折外准确率及 95\% 置信区间}
   \label{fig:modelcompare}
 \end{figure}
 
-\subsection{混淆结构与可视化}
+表 \ref{tab:model} 和图 \ref{fig:modelcompare} 给出四点主要发现。首先，固定
+MHD 比三维 max-HD 高 4.0 个百分点，说明将最坏点替换为整体最近距离均值能够
+改善真实分类。其次，嵌套多参数 MHD 达到 \TunedMHDAcc\%，五个外层折中四次选择
+$N=48$，且五次均选择 $w_v=0.5$，表明力度信息稳定有用，而过密采样可能放大
+局部装饰差异。第三，多变量 DTW 为 \DTWAcc\%，高于严格相位 RMSE，却仍低于
+MHD；这说明局部时间扭曲能够恢复部分信息，但点集整体形状在本数据中更稳健。
+第四，逻辑回归与随机森林分别达到 \LogisticAcc\% 和 \RFAcc\%，明显高于纯几何
+模型，说明曲风还依赖节奏、音级和力度动态等全局统计。
 
-最佳多参数 MHD 的折外混淆矩阵见图 \ref{fig:cmhd}。Classical 与 Jazz 的召回率
-分别为 65.0\% 和 58.8\%，而 Rock、Blues、Electronic 分别为 27.5\%、33.8\%
-和 25.0\%。Rock 易被判为 Classical 或 Blues，Electronic 易被判为 Rock 或
-Blues，说明“几何外形相近”并不等同于“曲风相同”。
-
-\begin{figure}[!htbp]
-  \centering
-  \includegraphics[width=0.98\textwidth]{confusion_models_cn.png}
-  \caption{两类模型的归一化折外混淆矩阵}
-  \label{fig:cmhd}
-\end{figure}
-
-图 \ref{fig:mds} 将固定权重 MHD 矩阵通过 MDS 映射到二维。各曲风存在局部聚集，
-但分布椭圆总体仍大量重叠，与配对 AUC 仅 0.5759 的结果一致。该图提示
-Hausdorff 空间具有弱簇结构，而非线性可分结构。
+\subsection{混淆结构与融合负结果}
 
 \begin{figure}[!htbp]
   \centering
-  \includegraphics[width=0.78\textwidth]{mds_mhd_cn.png}
-  \caption{MHD 距离矩阵的二维 MDS 投影}
-  \label{fig:mds}
+  \includegraphics[width=0.99\textwidth]{confusion_models_cn.png}
+  \caption{多参数 MHD、随机森林和概率融合的归一化折外混淆矩阵}
+  \label{fig:confusion}
 \end{figure}
 
-\subsection{描述符模型解释}
+图 \ref{fig:confusion} 表明，多参数 MHD 对 Classical 和 Jazz 的识别相对较好，
+而 Rock、Blues 和 Electronic 之间存在明显混淆。随机森林提高了五类整体召回，
+说明全局节奏与音级统计能够修正部分几何近邻错误。融合模型在内层五个外层折中
+均选择 $\alpha=0.75$，即更依赖随机森林；其准确率为 \FusionAcc\%，低于随机森林
+的 \RFAcc\%。McNemar--Holm 检验表明，随机森林显著优于多参数 MHD
+（$p\ \MHDvsRFHolmP$），但随机森林与融合模型差异不显著
+（$p=\RFvsFusionHolmP$）。
 
-随机森林采用每个外层测试折上的置换重要性，以“打乱某特征后平衡准确率的下降”
-衡量贡献。排名前列的是音级熵、力度范围、起音间隔标准差、曲长、平均音高和
-音高高分位数，见图 \ref{fig:importance}。这说明曲风不仅表现为三维轨迹的点集
-形状，也表现为节奏不规则性、音级使用丰富度和力度动态等统计属性。单个重要性
-数值较小还表明信息分散在多个相关描述符中，不宜把某一特征解释为唯一主因。
+\begin{table}[!htbp]
+  \centering
+  \small
+  \caption{三类主要模型的分曲风折外召回率（\%）}
+  \label{tab:recall}
+  \setlength{\tabcolsep}{7pt}
+  \begin{tabular}{lccccc}
+    \toprule
+    模型 & Classical & Jazz & Rock & Blues & Electronic\\
+    \midrule
+    多参数 MHD &
+    \TunedMHDClassicalRecall & \TunedMHDJazzRecall & \TunedMHDRockRecall &
+    \TunedMHDBluesRecall & \TunedMHDElectronicRecall\\
+    随机森林 &
+    \RFClassicalRecall & \RFJazzRecall & \RFRockRecall &
+    \RFBluesRecall & \RFElectronicRecall\\
+    概率融合 &
+    \FusionClassicalRecall & \FusionJazzRecall & \FusionRockRecall &
+    \FusionBluesRecall & \FusionElectronicRecall\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+表 \ref{tab:recall} 将总体指标拆到曲风层面。多参数 MHD 对 Classical 和 Jazz
+分别达到 \TunedMHDClassicalRecall\% 和 \TunedMHDJazzRecall\%，但 Rock 与
+Electronic 仅为 \TunedMHDRockRecall\% 和 \TunedMHDElectronicRecall\%。
+随机森林将 Classical 提高到 \RFClassicalRecall\%，并显著改善 Rock 和
+Electronic；融合只在 Rock 上比随机森林高 1 个百分点，却在其余多数类别略有下降。
+这说明融合负结果不是由单一类别异常造成，而是几何概率在多个类别边界上同时带来
+小幅收益与损失。
 
 \begin{figure}[!htbp]
   \centering
-  \includegraphics[width=0.76\textwidth]{feature_importance_cn.png}
-  \caption{随机森林描述符的折外置换重要性}
-  \label{fig:importance}
+  \includegraphics[width=0.82\textwidth]{fusion_complementarity_cn.png}
+  \caption{几何模型与描述符模型的正确性分歧及融合模型表现}
+  \label{fig:fusion}
 \end{figure}
 
-\section{敏感性与稳健性分析}
+图 \ref{fig:fusion} 进一步解释这一结果。MHD 能独立纠正一部分随机森林错误，
+随机森林也能纠正更多 MHD 错误，说明两者并非完全冗余；然而融合在“两者均错误”
+的样本上改善有限，并会破坏少量随机森林原本正确的判断。因此本研究不将融合模型
+宣称为性能提升，而将其视为一次有控制的负结果：几何相似性具有补充解释价值，
+但简单线性概率融合不足以稳定利用这种互补。
 
-\subsection{重采样点数}
+\subsection{典型误分类与模型分歧案例}
 
-把固定权重 MHD 曲线点数设为 48、72、96，准确率分别为 41.50\%、39.00\%
-和 38.00\%。三者均高于随机基线，但性能并不随离散密度单调提高：48 点均值
-最高，72 点折间波动最小。这说明过密采样可能放大局部装饰差异，不能先验认定
-96 点最优，因此最终模型把点数纳入内层选择。
+\begin{table}[H]
+  \centering
+  \footnotesize
+  \caption{代表性折外预测案例及三类主要模型的判断}
+  \label{tab:cases}
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{
+    >{\raggedright\arraybackslash}p{0.34\textwidth}
+    cccc
+  }
+    \toprule
+    作品文件名 & 真实曲风 & 多参数 MHD & 随机森林 & 概率融合\\
+    \midrule
+    Chicago Breakdown & Blues & \textbf{Blues} & Classical & \textbf{Blues}\\
+    3 Allegro ma non troppo & Classical & Jazz & \textbf{Classical} & \textbf{Classical}\\
+    Are You Ready To Fly & Electronic & Classical & \textbf{Electronic} & \textbf{Electronic}\\
+    A Walk In The Black Forest & Jazz & Blues & \textbf{Jazz} & \textbf{Jazz}\\
+    A Chi (Hurt) & Rock & \textbf{Rock} & Electronic & Electronic\\
+    Birth Of The Universe & Jazz & Classical & Rock & Classical\\
+    \bottomrule
+  \end{tabular}
+\end{table}
 
-\subsection{音量权重}
+表 \ref{tab:cases} 中所有判断均来自相应样本未参与训练和调参时的外层折外预测，
+案例仅用于解释机制，不用于重新选择模型。Chicago Breakdown 表明，当几何近邻
+给出较强正确证据时，融合仍可能抵消随机森林的错误；3 Allegro ma non troppo、
+Are You Ready To Fly 和 A Walk In The Black Forest 则显示描述符能够修正只看
+旋律形状造成的混淆。
 
-固定权重实验中，$w_v=0,0.1,0.25,0.5$ 的准确率分别为 34.00\%、36.50\%、
-38.00\%、40.00\%。音量维具有信息，但最优权重随数据折变化。正因如此，最终
-模型不直接把 0.5 当作全局最优，而在每个外层训练折中重新选择权重。
+相反，A Chi (Hurt) 中 MHD 已正确识别 Rock，但权重偏向随机森林的融合结果将其
+改判为 Electronic；Birth Of The Universe 中两侧模型分别误判为 Classical 和
+Rock，线性加权也无法凭空恢复 Jazz。由此可见，融合失败并非简单的“模型没有差异”，
+而是互补错误的置信度结构不稳定：少量几何独有正确样本不足以抵消描述符侧更强、
+但偶尔错误的概率输出。
+
+\subsection{描述符解释与特征组消融}
+
+随机森林的特征贡献使用每个外层测试折上的置换重要性衡量，即打乱某一特征后
+平衡准确率的下降。该量只表示预测关联，不应解释为因果作用。图
+\ref{fig:feature} 显示重要性分散在节奏、力度、音高和音级描述符中，没有单个变量
+支配模型。
+
+\begin{figure}[!htbp]
+  \centering
+  \begin{subfigure}{0.50\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{feature_importance_cn.png}
+    \caption{折外置换重要性}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}{0.47\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{feature_ablation_cn.png}
+    \caption{特征组消融}
+  \end{subfigure}
+  \caption{描述符模型的预测关联与组级信息贡献}
+  \label{fig:feature}
+\end{figure}
+
+消融实验每次删除一个特征组并重新执行相同外层验证。移除节奏组时平衡准确率下降
+4.8 个百分点，影响最大；移除力度动态、音级调性和音程轮廓时分别下降 2.2、1.8
+和 1.2 个百分点。尺度与长度、基础音高统计的影响较小。这一结果说明随机森林的
+优势并非单纯利用曲长，而主要来自节奏、动态和调性信息的联合表达。
+
+\section{敏感性与稳定性分析}
+
+\subsection{重采样密度与力度权重}
 
 \begin{figure}[!htbp]
   \centering
   \includegraphics[width=0.92\textwidth]{sensitivity_cn.png}
-  \caption{MHD 对重采样点数和音量权重的敏感性}
+  \caption{固定 MHD 对重采样点数和力度权重的敏感性}
   \label{fig:sensitivity}
 \end{figure}
 
+图 \ref{fig:sensitivity} 表明，MHD 的性能不随重采样点数单调增加。较稀疏的 48 点
+表示通常优于 96 点，说明过密采样会增加局部装饰和短时误差在平均最近距离中的
+影响。另一方面，力度权重从 0 增加到 0.5 时总体性能上升，证明力度并非可随意
+删除的附属维度。由于这些趋势仍随外层折变化，最终模型没有使用全数据上观察到的
+最佳组合，而坚持在每个外层训练集内重新选择。
+
 \subsection{随机分折稳定性}
 
-为检验结论是否依赖单一外层划分，本文使用随机种子 11、23、42、67、101
-重复完整的分组五折流程。固定 MHD、多参数 MHD、随机森林的平均准确率分别为
-$37.70\%\pm0.93\%$、$40.25\%\pm1.46\%$、$53.90\%\pm1.04\%$；多参数 MHD
-的取值范围为 38.50\%--42.00\%。图 \ref{fig:repeat} 表明三类模型的排序在五组
-划分中保持一致，主结论并非由某个“幸运分折”造成。
+五组完整外层分折下，多参数 MHD、随机森林和融合模型的平均准确率分别为
+\RepeatedMHDAcc\%$\pm$\RepeatedMHDStd\%、
+\RepeatedRFAcc\%$\pm$\RepeatedRFStd\% 和
+\RepeatedFusionAcc\%$\pm$\RepeatedFusionStd\%。三类模型在五次重复中的排序
+一致：随机森林最高，融合次之，多参数 MHD 最低。由此可见，主结论不是某一次
+“幸运分折”造成的；同时融合持续略低于随机森林，进一步支持不夸大融合收益。
 
-\begin{figure}[!htbp]
+\begin{figure}[H]
   \centering
-  \includegraphics[width=0.80\textwidth]{repeated_validation_cn.png}
-  \caption{五组外层随机分折下的模型稳定性}
+  \includegraphics[width=0.82\textwidth]{repeated_validation_cn.png}
+  \caption{五组外层随机种子下三类主要模型的稳定性}
   \label{fig:repeat}
 \end{figure}
 
@@ -561,58 +722,51 @@ $37.70\%\pm0.93\%$、$40.25\%\pm1.46\%$、$53.90\%\pm1.04\%$；多参数 MHD
 
 \subsection{模型优点}
 
-\begin{enumerate}[label=\arabic*.]
-  \item \textbf{几何解释清晰。} 距离直接对应两条三维旋律线的最近点偏差，可
-  解释为时间相位、相对音高和力度的综合差异。
-  \item \textbf{验证设计严格。} 跨曲风同名作品先剔除，同曲不同版本在抽样前归组；
-  每个曲名组只抽取一个版本，参数只在重复内层训练数据中选择，并额外检验五组
-  外层随机划分，降低数据泄漏、测试集调参偏差和偶然分折影响。
-  \item \textbf{改进有针对性。} Q95-HD 和 MHD 分别处理极端点敏感问题，加权
-  表示处理三维重要性差异；每项改动均有合成或真实数据实验支持。
-  \item \textbf{结论不过度外推。} 同类/异类差异虽显著，但 AUC 和分类精度表明
-  效应有限，故将 Hausdorff 定位为有效基线和几何先验，而非完备分类器。
-\end{enumerate}
+本文首先保证评价对象与题目一致：模型面对的是未见作品，而不是已见作品的另一
+版本。三重指纹并集分组比单纯按文件名去重更保守，所有分组隔离均由自动化测试
+验证。其次，稳健 Hausdorff 的每项改动都有对应证据：单点扰动检验支持均值型
+聚合，参数敏感性支持将采样密度和力度权重放入内层选择，距离分布检验则同时给出
+显著性和效应量。再次，全部模型共享外层折，并通过配对检验比较，避免横向表格中
+不同拆分造成的伪差异。最后，实验清单记录数据、代码、环境、参数和产物哈希，
+两次完整运行得到相同签名，具有较好的可追溯性。
 
 \subsection{模型局限}
 
-\begin{enumerate}[label=\arabic*.]
-  \item 最高音 skyline 对复调作品只是近似，伴奏高音可能被误当作主旋律。
-  \item Hausdorff 点集匹配不要求保持严格顺序，可能把走向相反但占据相似区域的
-  旋律判为相似。
-  \item ADL 的曲风标签由宽泛标签映射而来，Rock、Electronic 等大类内部差异大，
-  标签噪声限制了可达到的精度。
-  \item 数据仅保留钢琴声部，控制了音色变量，却也舍弃了真实曲风识别中极重要的
-  配器和音色信息。
-  \item 随机森林中的曲长可能同时反映数据来源和编曲习惯，不能全部解释为纯粹的
-  音乐学规律。
-\end{enumerate}
+skyline 只是主旋律的启发式近似，伴奏高音可能被误选，复调作品中的声部交换也会
+破坏连续性。Hausdorff 点集距离不严格保持顺序，虽然 DTW 提供了时序对照，但本文
+尚未进行乐句级局部匹配。旋律指纹为了防泄漏而忽略整体速度和移调，可能把少量
+相近改编保守地归为同组；这种做法降低样本利用率，却比让近重复跨折更安全。
 
-\subsection{可继续改进的方向}
+数据只来自 ADL 钢琴 MIDI。钢琴化控制了音色变量，但真实曲风识别中的配器、音色、
+和声织体被有意舍弃；Rock、Electronic 等宽标签内部异质性和标签噪声也限制了
+可达到精度。因此结果只能支持“在该语料、该五类和该旋律表示下的预测关联”，
+不能外推为普遍的音乐学因果规律。Bootstrap 区间和重复分折反映内部不确定性，
+不能替代独立数据集上的外部验证。
 
-后续可用动态规划或学习式声部跟踪替代最高音规则；将 Hausdorff 与离散
-Fr\'echet、编辑距离、节奏直方图和调性特征融合；也可把旋律分成短乐句，先做
-局部匹配再聚合，从而减少整曲归一化对局部主题的稀释。若面向实际曲风分类，
-还应加入音色、和声与配器信息。
+\subsection{进一步改进方向}
+
+后续可使用动态规划或学习式声部跟踪替代最高音规则，并将整曲划分为短乐句后执行
+局部 MHD 或局部 DTW，再对主题级相似性聚合。对于融合模型，可在严格嵌套框架下
+尝试基于校准概率的 stacking，而不是固定线性加权。若目标转向真实曲风分类，
+还应加入和弦、调式转移、音色与配器特征，并在独立 MIDI 语料上进行外部验证。
 
 \section{结论}
 
-本文建立了从 MIDI 音符到三维旋律曲线、从 Hausdorff 距离到曲风验证的完整
-模型。400 首五类平衡数据上的结果表明：
-\begin{enumerate}[label=\arabic*.]
-  \item 同曲风旋律的 MHD 显著小于异曲风旋律，组级置换检验 $p=0.0005$，说明几何
-  距离具有真实但较弱的曲风信息；
-  \item 原始三维 Hausdorff 的分组五折准确率为 32.00\%，MHD 提升至 38.00\%，
-  验证了降低离群点敏感性的必要性；
-  \item 嵌套选择重采样点数、音量权重和近邻数后，多参数 MHD 达到
-  $42.00\%\pm6.16\%$；五组外层随机划分的平均准确率为 40.25\%，约为随机
-  基线的 2 倍；
-  \item 多统计描述符随机森林达到 53.75\%，五次重复平均为 53.90\%，说明
-  Hausdorff 最适合作为可解释的几何相似性组件，与节奏、音级和动态特征联合使用。
-\end{enumerate}
+本文建立了从 MIDI 文件审计、三维旋律表示、稳健 Hausdorff 距离到可信曲风评价的
+完整模型。研究表明，同曲风旋律的 MHD 在总体上小于异曲风旋律，
+\PermutationCount 次置换检验得到 $p=\PermutationP$，但配对 AUC 仅为
+\PairAUC，说明几何信息真实存在而效应有限。MHD 将固定三维 max-HD 的准确率从
+\HDTPVAcc\% 提升到 \FixedMHDAcc\%，嵌套选择后达到 \TunedMHDAcc\%，验证了
+稳健聚合、适度离散和力度权重的重要性。
 
-因此，对题目所问“该度量在区分音乐曲风方面是否有效”，本文的回答是：
-\textbf{有效，但有限。}它能够量化旋律线的几何接近程度并提供高于随机的曲风
-区分能力，但不足以单独完成可靠的多曲风识别。
+描述符随机森林达到 \RFAcc\%，显著优于主要几何模型；节奏组消融造成最大性能下降，
+说明曲风信息广泛分布于节奏、动态、音级和轮廓。MHD--RF 融合为 \FusionAcc\%，
+与随机森林差异不显著且重复实验中持续略低，表明简单概率融合不能保证收益。
+
+因此，对题目所问“Hausdorff 距离在区分音乐曲风方面是否有效”，本文的回答是：
+\textbf{有效，但有限，而且其最大价值在于可解释的几何相似性，而非单独追求最高
+分类精度。}稳健 Hausdorff 能够揭示旋律形状的群体差异，并为多特征系统提供独立
+视角；要获得更可靠的曲风识别，仍需结合节奏、调性、动态、和声和音色信息。
 
 {\small
 \begin{thebibliography}{99}
@@ -640,8 +794,37 @@ Ferreira L N, Lelis L H S, Whitehead J. Computer-generated music for tabletop
 role-playing games[C]. Proceedings of the 16th AAAI Conference on Artificial
 Intelligence and Interactive Digital Entertainment, 2020.
 
+\bibitem{knn}
+Cover T M, Hart P E. Nearest neighbor pattern classification[J].
+IEEE Transactions on Information Theory, 1967, 13(1): 21--27.
+
 \bibitem{rf}
 Breiman L. Random forests[J]. Machine Learning, 2001, 45: 5--32.
+
+\bibitem{genre}
+Tzanetakis G, Cook P. Musical genre classification of audio signals[J].
+IEEE Transactions on Speech and Audio Processing, 2002, 10(5): 293--302.
+
+\bibitem{varma}
+Varma S, Simon R. Bias in error estimation when using cross-validation for
+model selection[J]. BMC Bioinformatics, 2006, 7: 91.
+
+\bibitem{cawley}
+Cawley G C, Talbot N L C. On over-fitting in model selection and subsequent
+selection bias in performance evaluation[J]. Journal of Machine Learning
+Research, 2010, 11: 2079--2107.
+
+\bibitem{efron}
+Efron B, Tibshirani R J. \textit{An Introduction to the Bootstrap}.
+New York: Chapman and Hall, 1993.
+
+\bibitem{mcnemar}
+McNemar Q. Note on the sampling error of the difference between correlated
+proportions or percentages[J]. Psychometrika, 1947, 12(2): 153--157.
+
+\bibitem{holm}
+Holm S. A simple sequentially rejective multiple test procedure[J].
+Scandinavian Journal of Statistics, 1979, 6(2): 65--70.
 
 \end{thebibliography}
 }
@@ -649,45 +832,82 @@ Breiman L. Random forests[J]. Machine Learning, 2001, 45: 5--32.
 \appendix
 \section{复现实验说明}
 
-最终实验入口为项目根目录下的 \texttt{code/final\_experiment.py}。在本机
-Anaconda 环境中执行：
+最终实验入口和依赖清单分别为：
+\begin{center}
+  \path{code/final_experiment.py}\\
+  \path{requirements.txt}
+\end{center}
+在项目根目录执行：
 \begin{lstlisting}[language=bash]
-D:\app\Anaconda\python.exe code\final_experiment.py
-D:\app\Anaconda\python.exe code\paper_assets.py
+python code/final_experiment.py --per-genre 100 --points 96
+python code/paper_assets.py
+latexmk -xelatex -interaction=nonstopmode \
+  -halt-on-error -cd report_clk/main.tex
 \end{lstlisting}
 
-程序输出结构如下：
-\begin{itemize}
-  \item \texttt{results/final/cache/}：平衡抽样数据与距离矩阵缓存；
-  \item \texttt{results/final/tables/}：机器可读的原始数值 CSV；
-  \item \texttt{results/final/tables\_paper/}：带中文表头和统一精度的展示型 CSV；
-  \item \texttt{results/final/figures\_paper/}：300 dpi 中文论文图件；
-  \item \texttt{results/final/summary.json}：机器可读的完整结果摘要。
-\end{itemize}
-缓存文件名绑定流水线版本 \texttt{v2}，防止旧预处理结果被误复用；解析失败样本
-及原因另存为 \texttt{sample\_failures.csv}。基础解析与距离性质由
-\texttt{code/test\_pipeline.py} 中的回归测试复核，运行命令见 README。
+快速链路检查可使用：
+\begin{lstlisting}[language=bash]
+python code/final_experiment.py --quick
+\end{lstlisting}
 
-\section{算法伪代码}
+程序将机器可读结果写入 \path{results/final/summary.json}，将数据审计、折级
+指标、置信区间、配对检验、特征消融和误分类清单写入
+\path{results/final/tables/}，将全部折外预测保存为
+\path{results/final/predictions_primary.npz}，并将代码、数据、环境和产物哈希
+记录在 \path{results/final/run_manifest.json}。论文核心数字由
+\path{report_clk/generated_results.tex} 自动导入，不手工复制。
+
+\section{支撑材料文件列表}
+
+\begin{table}[H]
+  \centering
+  \small
+  \caption{主要支撑材料及用途}
+  \begin{tabular}{
+    >{\raggedright\arraybackslash}p{0.35\textwidth}
+    >{\raggedright\arraybackslash}p{0.56\textwidth}
+  }
+    \toprule
+    文件或目录 & 用途\\
+    \midrule
+    \path{code/data_pipeline.py} & 三重指纹、并集分组、平衡抽样和数据审计\\
+    \path{code/distance_models.py} & Hausdorff 距离族、轨迹 RMSE、多变量 DTW 和缓存\\
+    \path{code/evaluation.py} & 嵌套分组验证、Bootstrap、McNemar--Holm、融合与消融\\
+    \path{code/final_experiment.py} & 完整实验编排及稳定输出契约\\
+    \path{code/paper_assets.py} & 中文论文图表与展示表生成\\
+    \path{code/test_pipeline.py} & MIDI、指纹、距离、分组隔离和端到端回归测试\\
+    \path{results/final/tables/} & 原始数值、审计证据、统计检验和诊断清单\\
+    \shortstack[l]{\texttt{results/final/}\\\texttt{run\_manifest.json}} &
+    实验参数、环境、数据摘要与产物哈希\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{主要算法伪代码}
 
 \begin{lstlisting}[
   language=Python,
   basicstyle=\ttfamily\footnotesize,
-  caption={多参数 MHD 嵌套交叉验证}
+  caption={防泄漏分组与嵌套概率融合}
 ]
-for train, test in grouped_stratified_5fold:
-    candidates = []
-    for N, w, K in product([48, 72, 96],
-                           [0, 0.1, 0.25, 0.5],
-                           [1, 3, 5, 7, 9]):
-        scores = [
-            grouped_inner_3fold_score(D[N, w], K, train, seed)
-            for seed in [2026, 2027, 2028]
-        ]
-        candidates.append((mean(scores), N, w, K))
-    _, N_best, w_best, K_best = max(candidates)
-    predict(test, D[N_best, w_best], K_best)
-aggregate all out-of-fold predictions
+index every MIDI:
+    title_id   = canonical_title(file)
+    byte_id    = sha256(file)
+    melody_id  = hash(normalized_skyline(file))
+union files sharing any identifier
+exclude every connected component spanning multiple genres
+sample one parseable version from each remaining component
+
+for outer_train, outer_test in grouped_stratified_5fold:
+    for inner split generated only from outer_train:
+        fit RF descriptors on inner_train
+        for N, velocity_weight, K, rf_weight:
+            P_mhd = KNN_probability(distance[N, velocity_weight], K)
+            P_mix = rf_weight * P_rf + (1-rf_weight) * P_mhd
+            score candidate on inner_validation
+    choose candidate with highest mean inner balanced accuracy
+    refit RF on outer_train and evaluate outer_test once
+aggregate all outer-fold predictions
 \end{lstlisting}
 
 \end{document}

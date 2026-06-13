@@ -1,5 +1,6 @@
 # Large source dataset; not required to compile the paper.
 /adl-piano-midi/
+/adl-piano-midi.zip
 
 # Generated experiment outputs. The paper uses committed copies in
 # report_clk/figures/, so this directory is only needed to rerun experiments
@@ -12,6 +13,14 @@
 # Python caches.
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# Local Python environments.
+.venv/
+venv/
 
 # LaTeX build artifacts. Keep report_clk/main.pdf under version control.
 *.aux
@@ -22,3 +31,10 @@ __pycache__/
 *.xdv
 *.synctex.gz
 /report_clk/.layout_preview/
+
+# Local render checks, editors, and OS metadata.
+/tmp/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

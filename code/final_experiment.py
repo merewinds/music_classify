@@ -1,807 +1,146 @@
-"""Reproducible final experiment for melody-curve genre classification.
-
-Run from the repository root:
-    D:/app/Anaconda/python.exe code/final_experiment.py
-"""
+"""Run the version-3 leakage-safe melody geometry experiment."""
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
-import struct
 import sys
 import time
-from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
-from scipy.spatial import cKDTree
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.inspection import permutation_importance
-from sklearn.manifold import MDS
-from sklearn.metrics import (
-    accuracy_score,
-    balanced_accuracy_score,
-    confusion_matrix,
-    f1_score,
-    roc_auc_score,
-)
-from sklearn.model_selection import StratifiedGroupKFold
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from midi_geometry import (  # noqa: E402
-    canonical_title,
-    load_one_midi,
-    local_minmax_curve,
-    nearest_distance_summaries,
-    relative_curve,
+
+from data_pipeline import (  # noqa: E402
+    CACHE_DIR,
+    DATA_DIR,
+    GENRES,
+    PIPELINE_VERSION,
+    RESULTS_DIR,
+    ROOT,
+    TABLE_DIR,
+    dataset_cache_path,
+    ensure_dirs,
+    read_csv,
+    sample_dataset,
+    save_csv,
+)
+from distance_models import (  # noqa: E402
+    build_dtw_grid,
+    build_mhd_grid,
+    compute_base_distances,
+    distance_cache_path,
+    sensitivity_cache_path,
+)
+from evaluation import (  # noqa: E402
+    INNER_SEEDS,
+    REPEAT_OUTER_SEEDS,
+    class_recall_rows,
+    disagreement_rows,
+    distance_statistics,
+    evaluate_distance_metric,
+    evaluate_fusion,
+    evaluate_logistic_regression,
+    evaluate_random_forest,
+    evaluate_tuned_dtw,
+    evaluate_tuned_mhd,
+    feature_ablation,
+    mcnemar_holm,
+    repeated_validation,
+)
+from midi_geometry import nearest_distance_summaries, relative_curve  # noqa: E402
+from provenance import (  # noqa: E402
+    artifact_inventory,
+    combined_digest,
+    environment_snapshot,
+    write_manifest,
 )
 
 
-ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = ROOT / "adl-piano-midi"
-RESULTS_DIR = ROOT / "results" / "final"
-FIGURE_DIR = RESULTS_DIR / "figures"
-TABLE_DIR = RESULTS_DIR / "tables"
-CACHE_DIR = RESULTS_DIR / "cache"
-PIPELINE_VERSION = "v2"
-GENRES = ["Classical", "Jazz", "Rock", "Blues", "Electronic"]
-COLORS = {
-    "Classical": "#4472C4",
-    "Jazz": "#ED7D31",
-    "Rock": "#A5A5A5",
-    "Blues": "#5B9BD5",
-    "Electronic": "#70AD47",
-}
-INNER_SEEDS = (2026, 2027, 2028)
-REPEAT_OUTER_SEEDS = (11, 23, 42, 67, 101)
+PREDICTION_FILE = RESULTS_DIR / "predictions_primary.npz"
+SUMMARY_FILE = RESULTS_DIR / "summary.json"
+MANIFEST_FILE = RESULTS_DIR / "run_manifest.json"
+CONFIG_FILE = RESULTS_DIR / "experiment_config.json"
+LATEX_VALUES_FILE = ROOT / "report_clk" / "generated_results.tex"
 
 
-def dataset_cache_path(per_genre: int, n_points: int, seed: int) -> Path:
-    return CACHE_DIR / (
-        f"dataset_{PIPELINE_VERSION}_g{per_genre}_p{n_points}_s{seed}.npz"
-    )
-
-
-def distance_cache_path(per_genre: int, n_points: int, seed: int) -> Path:
-    return CACHE_DIR / (
-        f"distances_{PIPELINE_VERSION}_g{per_genre}_p{n_points}_s{seed}.npz"
-    )
-
-
-def sensitivity_cache_path(per_genre: int, seed: int) -> Path:
-    return CACHE_DIR / f"sensitivity_mhd_{PIPELINE_VERSION}_g{per_genre}_s{seed}.npz"
-
-
-def ensure_dirs() -> None:
-    for path in (RESULTS_DIR, FIGURE_DIR, TABLE_DIR, CACHE_DIR):
-        path.mkdir(parents=True, exist_ok=True)
-
-
-def save_csv(path: Path, rows: list[dict]) -> None:
-    if not rows:
-        return
-    fieldnames = list(dict.fromkeys(key for row in rows for key in row))
-    with path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def sample_dataset(
-    per_genre: int,
-    n_points: int,
-    seed: int,
-    rebuild: bool = False,
-) -> dict[str, np.ndarray]:
-    cache_path = dataset_cache_path(per_genre, n_points, seed)
-    if cache_path.exists() and not rebuild:
-        print(f"[data] loading cache: {cache_path}")
-        loaded = np.load(cache_path, allow_pickle=False)
-        result = {key: loaded[key] for key in loaded.files}
-        required = {
-            "curves",
-            "features",
-            "labels",
-            "groups",
-            "filenames",
-            "feature_names",
-        }
-        if not required.issubset(result):
-            raise ValueError(f"dataset cache is incomplete: {cache_path}")
-        if result["curves"].shape != (per_genre * len(GENRES), n_points, 3):
-            raise ValueError(f"dataset cache shape does not match configuration: {cache_path}")
-        if str(result.get("pipeline_version", "")) != PIPELINE_VERSION:
-            raise ValueError(f"dataset cache version mismatch: {cache_path}")
-        return result
-
-    rng = np.random.default_rng(seed)
-    all_titles: dict[str, set[str]] = {}
-    files_by_genre: dict[str, list[Path]] = {}
-    for genre in GENRES:
-        files = sorted((DATA_DIR / genre).glob("*.mid"))
-        files_by_genre[genre] = files
-        for path in files:
-            title = canonical_title(path)
-            all_titles.setdefault(title, set()).add(genre)
-
-    cross_genre_titles = {
-        title for title, title_genres in all_titles.items() if len(title_genres) > 1
-    }
-    print(f"[data] excluding {len(cross_genre_titles)} cross-genre title groups")
-
-    curves = []
-    features = []
-    labels = []
-    groups = []
-    filenames = []
-    metadata_rows = []
-    failure_rows = []
-    feature_names: list[str] | None = None
-
-    for genre in GENRES:
-        candidates_by_group: dict[str, list[Path]] = defaultdict(list)
-        for path in files_by_genre[genre]:
-            title = canonical_title(path)
-            if title not in cross_genre_titles:
-                candidates_by_group[title].append(path)
-
-        candidate_groups = sorted(candidates_by_group)
-        order = rng.permutation(len(candidate_groups))
-        failures = Counter()
-        accepted = 0
-        for index in order:
-            group = candidate_groups[int(index)]
-            paths = candidates_by_group[group]
-            path_order = rng.permutation(len(paths))
-            parsed = None
-            selected_path = None
-            for path_index in path_order:
-                path = paths[int(path_index)]
-                try:
-                    parsed = load_one_midi(path, n_points=n_points)
-                    selected_path = path
-                    break
-                except (OSError, ValueError, struct.error) as exc:
-                    failures[type(exc).__name__] += 1
-                    failure_rows.append(
-                        {
-                            "genre": genre,
-                            "file": path.name,
-                            "group": group,
-                            "error_type": type(exc).__name__,
-                            "error": str(exc),
-                        }
-                    )
-            if parsed is None or selected_path is None:
-                continue
-            curve, feat, names, meta = parsed
-            curves.append(curve)
-            features.append(feat)
-            labels.append(genre)
-            groups.append(group)
-            filenames.append(selected_path.name)
-            feature_names = names
-            metadata_rows.append(
-                {
-                    "genre": genre,
-                    "file": selected_path.name,
-                    "group": group,
-                    "available_versions": len(paths),
-                    **meta,
-                }
-            )
-            accepted += 1
-            if accepted >= per_genre:
-                break
-        if accepted < per_genre:
-            raise RuntimeError(
-                f"{genre}: only {accepted}/{per_genre} usable files; failures={failures}"
-            )
-        print(f"[data] {genre}: {accepted} accepted, failures={sum(failures.values())}")
-
-    result = {
-        "curves": np.asarray(curves, dtype=np.float64),
-        "features": np.asarray(features, dtype=np.float64),
-        "labels": np.asarray(labels, dtype=str),
-        "groups": np.asarray(groups, dtype=str),
-        "filenames": np.asarray(filenames, dtype=str),
-        "feature_names": np.asarray(feature_names, dtype=str),
-        "cross_genre_title_count": np.asarray(len(cross_genre_titles)),
-        "pipeline_version": np.asarray(PIPELINE_VERSION),
-    }
-    if len(np.unique(result["groups"])) != len(result["groups"]):
-        raise RuntimeError("group-level sampling produced duplicate title groups")
-    np.savez_compressed(cache_path, **result)
-    save_csv(TABLE_DIR / "sample_metadata.csv", metadata_rows)
-    save_csv(TABLE_DIR / "sample_failures.csv", failure_rows)
-    print(f"[data] cache written: {cache_path}")
+def genre_mean_matrix(matrix: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    result = np.zeros((len(GENRES), len(GENRES)), dtype=np.float64)
+    for row, genre_a in enumerate(GENRES):
+        index_a = np.flatnonzero(labels == genre_a)
+        for column, genre_b in enumerate(GENRES):
+            index_b = np.flatnonzero(labels == genre_b)
+            block = matrix[np.ix_(index_a, index_b)]
+            if row == column:
+                block = block[np.triu_indices_from(block, k=1)]
+            result[row, column] = block.mean()
     return result
 
 
-def _fill_distance_row(
-    i: int,
-    curves: np.ndarray,
-    trees: list[cKDTree],
-    wanted: tuple[str, ...],
-) -> tuple[int, dict[str, np.ndarray]]:
-    n = len(curves)
-    rows = {name: np.zeros(n, dtype=np.float64) for name in wanted}
-    for j in range(i + 1, n):
-        hd, q95, mhd = nearest_distance_summaries(
-            curves[i], curves[j], trees[i], trees[j]
-        )
-        values = {"hd": hd, "q95": q95, "mhd": mhd}
-        for name in wanted:
-            rows[name][j] = values[name]
-    return i, rows
-
-
-def distance_family(
-    curves: np.ndarray,
-    wanted: tuple[str, ...],
-    workers: int,
-    label: str,
-) -> dict[str, np.ndarray]:
-    n = len(curves)
-    matrices = {name: np.zeros((n, n), dtype=np.float64) for name in wanted}
-    trees = [cKDTree(curve) for curve in curves]
-    started = time.time()
-    completed = 0
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
-            pool.submit(_fill_distance_row, i, curves, trees, wanted)
-            for i in range(n - 1)
-        ]
-        for future in as_completed(futures):
-            i, rows = future.result()
-            for name, row in rows.items():
-                matrices[name][i, i + 1 :] = row[i + 1 :]
-                matrices[name][i + 1 :, i] = row[i + 1 :]
-            completed += 1
-            if completed % 40 == 0 or completed == n - 1:
-                elapsed = time.time() - started
-                print(f"[distance:{label}] rows {completed}/{n-1}, {elapsed:.1f}s")
-    return matrices
-
-
-def dtw_pair(a: np.ndarray, b: np.ndarray, window: int = 14) -> float:
-    n, m = len(a), len(b)
-    window = max(window, abs(n - m))
-    previous = np.full(m + 1, np.inf)
-    current = np.full(m + 1, np.inf)
-    previous[0] = 0.0
-    for i in range(1, n + 1):
-        current.fill(np.inf)
-        start = max(1, i - window)
-        stop = min(m, i + window)
-        for j in range(start, stop + 1):
-            cost = abs(a[i - 1] - b[j - 1])
-            current[j] = cost + min(previous[j], current[j - 1], previous[j - 1])
-        previous, current = current, previous
-    return float(previous[m] / (n + m))
-
-
-def dtw_matrix(curves: np.ndarray, workers: int) -> np.ndarray:
-    pitch = np.asarray(
-        [(curve[:, 1] - np.median(curve[:, 1])) / 12.0 for curve in curves]
+def synthetic_robustness() -> list[dict]:
+    phase = np.linspace(0, 1, 96)
+    base = np.column_stack(
+        (phase, 0.55 * np.sin(4 * np.pi * phase), np.zeros_like(phase))
     )
-    n = len(pitch)
-    matrix = np.zeros((n, n), dtype=np.float64)
-
-    def row_task(i: int) -> tuple[int, np.ndarray]:
-        row = np.zeros(n)
-        for j in range(i + 1, n):
-            row[j] = dtw_pair(pitch[i], pitch[j])
-        return i, row
-
-    started = time.time()
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(row_task, i) for i in range(n - 1)]
-        for completed, future in enumerate(as_completed(futures), start=1):
-            i, row = future.result()
-            matrix[i, i + 1 :] = row[i + 1 :]
-            matrix[i + 1 :, i] = row[i + 1 :]
-            if completed % 40 == 0 or completed == n - 1:
-                print(
-                    f"[distance:dtw] rows {completed}/{n-1}, "
-                    f"{time.time()-started:.1f}s"
-                )
-    return matrix
-
-
-def validate_distance_matrix(name: str, matrix: np.ndarray) -> None:
-    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
-        raise ValueError(f"{name}: distance matrix is not square")
-    if not np.allclose(matrix, matrix.T, atol=1e-12):
-        raise ValueError(f"{name}: distance matrix is not symmetric")
-    if not np.allclose(np.diag(matrix), 0.0, atol=1e-12):
-        raise ValueError(f"{name}: distance matrix diagonal is not zero")
-    if not np.isfinite(matrix).all() or np.any(matrix < 0):
-        raise ValueError(f"{name}: distance matrix contains invalid values")
-    upper = matrix[np.triu_indices_from(matrix, k=1)]
-    nonzero_fraction = float(np.mean(upper > 1e-12))
-    if nonzero_fraction < 0.95:
-        raise ValueError(
-            f"{name}: only {nonzero_fraction:.1%} pairwise distances are nonzero"
+    rows = []
+    for amplitude in np.linspace(0, 2.0, 11):
+        perturbed = base.copy()
+        perturbed[48, 1] += amplitude
+        hd, q95, mhd = nearest_distance_summaries(base, perturbed)
+        rows.append(
+            {
+                "outlier_amplitude": float(amplitude),
+                "hd": hd,
+                "q95": q95,
+                "mhd": mhd,
+            }
         )
+    return rows
 
 
-def compute_distances(
-    base_curves: np.ndarray,
-    per_genre: int,
-    n_points: int,
-    seed: int,
-    workers: int,
-    rebuild: bool = False,
-) -> dict[str, np.ndarray]:
-    cache_path = distance_cache_path(per_genre, n_points, seed)
-    if cache_path.exists() and not rebuild:
-        print(f"[distance] loading cache: {cache_path}")
-        loaded = np.load(cache_path, allow_pickle=False)
-        cached = {key: loaded[key] for key in loaded.files}
-        for name, matrix in cached.items():
-            validate_distance_matrix(name, matrix)
-        return cached
-
-    local = np.asarray([local_minmax_curve(curve) for curve in base_curves])
-    tp = np.asarray([relative_curve(curve, velocity_weight=0.0) for curve in base_curves])
-    tpv = np.asarray(
-        [relative_curve(curve, velocity_weight=0.25) for curve in base_curves]
-    )
-
-    result = {}
-    result["hd_local"] = distance_family(
-        local, ("hd",), workers, "hd-local"
-    )["hd"]
-    result["hd_tp"] = distance_family(tp, ("hd",), workers, "hd-tp")["hd"]
-    robust = distance_family(tpv, ("hd", "q95", "mhd"), workers, "tpv")
-    result["hd_tpv"] = robust["hd"]
-    result["q95_tpv"] = robust["q95"]
-    result["mhd_tpv"] = robust["mhd"]
-    result["dtw_pitch"] = dtw_matrix(base_curves, workers)
-    for name, matrix in result.items():
-        validate_distance_matrix(name, matrix)
-    np.savez_compressed(cache_path, **result)
-    print(f"[distance] cache written: {cache_path}")
-    return result
-
-
-def predict_knn(
-    distance_matrix: np.ndarray,
-    train_idx: np.ndarray,
-    test_idx: np.ndarray,
-    labels: np.ndarray,
-    k: int,
-) -> np.ndarray:
-    predictions = []
-    for test in test_idx:
-        ordered = train_idx[np.argsort(distance_matrix[test, train_idx])[:k]]
-        neighbor_labels = labels[ordered]
-        counts = Counter(neighbor_labels)
-        max_count = max(counts.values())
-        tied = {label for label, count in counts.items() if count == max_count}
-        predictions.append(next(label for label in neighbor_labels if label in tied))
-    return np.asarray(predictions)
-
-
-def choose_k(
-    matrix: np.ndarray,
-    train_idx: np.ndarray,
+def sensitivity_rows(
+    matrices: dict[tuple[int, float], np.ndarray],
     labels: np.ndarray,
     groups: np.ndarray,
-    candidates: tuple[int, ...] = (1, 3, 5, 7, 9),
-    inner_seeds: tuple[int, ...] = INNER_SEEDS,
-) -> int:
-    inner_labels = labels[train_idx]
-    inner_groups = groups[train_idx]
-    scores = {k: [] for k in candidates}
-    for inner_seed in inner_seeds:
-        splitter = StratifiedGroupKFold(
-            n_splits=3, shuffle=True, random_state=inner_seed
-        )
-        for inner_train, inner_test in splitter.split(
-            np.zeros(len(train_idx)), inner_labels, inner_groups
-        ):
-            global_train = train_idx[inner_train]
-            global_test = train_idx[inner_test]
-            for k in candidates:
-                pred = predict_knn(matrix, global_train, global_test, labels, k)
-                scores[k].append(balanced_accuracy_score(labels[global_test], pred))
-    return max(candidates, key=lambda k: (np.mean(scores[k]), -k))
-
-
-def evaluate_distance_metric(
-    name: str,
-    matrix: np.ndarray,
-    labels: np.ndarray,
-    groups: np.ndarray,
-    outer_seed: int = 42,
-    inner_seeds: tuple[int, ...] = INNER_SEEDS,
-) -> tuple[dict, np.ndarray, np.ndarray]:
-    splitter = StratifiedGroupKFold(
-        n_splits=5, shuffle=True, random_state=outer_seed
-    )
-    predictions = np.empty(len(labels), dtype=labels.dtype)
-    fold_rows = []
-    selected_k = []
-    for fold, (train_idx, test_idx) in enumerate(
-        splitter.split(np.zeros(len(labels)), labels, groups), start=1
-    ):
-        k = choose_k(
-            matrix,
-            train_idx,
+    base_points: int,
+    inner_seeds: tuple[int, ...],
+) -> list[dict]:
+    rows = []
+    point_values = sorted({points for points, _ in matrices})
+    weight_values = sorted({weight for _, weight in matrices})
+    for points in point_values:
+        key = (points, 0.25)
+        if key not in matrices:
+            continue
+        summary, _, _, _ = evaluate_distance_metric(
+            f"MHD points={points}",
+            matrices[key],
             labels,
             groups,
             inner_seeds=inner_seeds,
-        )
-        selected_k.append(k)
-        pred = predict_knn(matrix, train_idx, test_idx, labels, k)
-        predictions[test_idx] = pred
-        fold_rows.append(
-            {
-                "method": name,
-                "fold": fold,
-                "k": k,
-                "n_test": len(test_idx),
-                "accuracy": accuracy_score(labels[test_idx], pred),
-                "balanced_accuracy": balanced_accuracy_score(labels[test_idx], pred),
-                "macro_f1": f1_score(labels[test_idx], pred, average="macro"),
-            }
-        )
-
-    fold_acc = np.asarray([row["accuracy"] for row in fold_rows])
-    summary = {
-        "method": name,
-        "accuracy": accuracy_score(labels, predictions),
-        "balanced_accuracy": balanced_accuracy_score(labels, predictions),
-        "macro_f1": f1_score(labels, predictions, average="macro"),
-        "fold_mean": fold_acc.mean(),
-        "fold_std": fold_acc.std(ddof=1),
-        "k_mode": Counter(selected_k).most_common(1)[0][0],
-        "k_selected": "/".join(map(str, selected_k)),
-    }
-    return summary, predictions, np.asarray(fold_rows, dtype=object)
-
-
-def evaluate_random_forest(
-    features: np.ndarray,
-    labels: np.ndarray,
-    groups: np.ndarray,
-    outer_seed: int = 42,
-    compute_importance: bool = True,
-) -> tuple[dict, np.ndarray, list[dict], np.ndarray]:
-    splitter = StratifiedGroupKFold(
-        n_splits=5, shuffle=True, random_state=outer_seed
-    )
-    predictions = np.empty(len(labels), dtype=labels.dtype)
-    fold_rows = []
-    importances = []
-    for fold, (train_idx, test_idx) in enumerate(
-        splitter.split(features, labels, groups), start=1
-    ):
-        model = RandomForestClassifier(
-            n_estimators=500,
-            min_samples_leaf=2,
-            max_features="sqrt",
-            class_weight="balanced",
-            random_state=10_000 + outer_seed * 10 + fold,
-            n_jobs=-1,
-        )
-        model.fit(features[train_idx], labels[train_idx])
-        pred = model.predict(features[test_idx])
-        predictions[test_idx] = pred
-        if compute_importance:
-            importance = permutation_importance(
-                model,
-                features[test_idx],
-                labels[test_idx],
-                scoring="balanced_accuracy",
-                n_repeats=10,
-                random_state=20_000 + outer_seed * 10 + fold,
-                n_jobs=-1,
-            )
-            importances.append(importance.importances_mean)
-        fold_rows.append(
-            {
-                "method": "RF descriptors",
-                "fold": fold,
-                "k": "",
-                "n_test": len(test_idx),
-                "accuracy": accuracy_score(labels[test_idx], pred),
-                "balanced_accuracy": balanced_accuracy_score(labels[test_idx], pred),
-                "macro_f1": f1_score(labels[test_idx], pred, average="macro"),
-            }
-        )
-    fold_acc = np.asarray([row["accuracy"] for row in fold_rows])
-    summary = {
-        "method": "RF descriptors",
-        "accuracy": accuracy_score(labels, predictions),
-        "balanced_accuracy": balanced_accuracy_score(labels, predictions),
-        "macro_f1": f1_score(labels, predictions, average="macro"),
-        "fold_mean": fold_acc.mean(),
-        "fold_std": fold_acc.std(ddof=1),
-        "k_mode": "",
-        "k_selected": "",
-    }
-    mean_importance = (
-        np.mean(importances, axis=0)
-        if importances
-        else np.full(features.shape[1], np.nan)
-    )
-    return summary, predictions, fold_rows, mean_importance
-
-
-def evaluate_tuned_mhd(
-    parameter_matrices: dict[tuple[int, float], np.ndarray],
-    labels: np.ndarray,
-    groups: np.ndarray,
-    outer_seed: int = 42,
-    inner_seeds: tuple[int, ...] = INNER_SEEDS,
-) -> tuple[dict, np.ndarray, list[dict]]:
-    """Nested selection of grid resolution, velocity weight, and K."""
-    candidates = (1, 3, 5, 7, 9)
-    splitter = StratifiedGroupKFold(
-        n_splits=5, shuffle=True, random_state=outer_seed
-    )
-    predictions = np.empty(len(labels), dtype=labels.dtype)
-    fold_rows = []
-    selections: list[tuple[int, float, int]] = []
-
-    for fold, (train_idx, test_idx) in enumerate(
-        splitter.split(np.zeros(len(labels)), labels, groups), start=1
-    ):
-        inner_labels = labels[train_idx]
-        inner_groups = groups[train_idx]
-        scores = {
-            (n_points, weight, k): []
-            for n_points, weight in parameter_matrices
-            for k in candidates
-        }
-        for inner_seed in inner_seeds:
-            inner = StratifiedGroupKFold(
-                n_splits=3, shuffle=True, random_state=inner_seed
-            )
-            for inner_train, inner_test in inner.split(
-                np.zeros(len(train_idx)), inner_labels, inner_groups
-            ):
-                global_train = train_idx[inner_train]
-                global_test = train_idx[inner_test]
-                for (n_points, weight), matrix in parameter_matrices.items():
-                    for k in candidates:
-                        pred = predict_knn(
-                            matrix,
-                            global_train,
-                            global_test,
-                            labels,
-                            k,
-                        )
-                        scores[(n_points, weight, k)].append(
-                            balanced_accuracy_score(labels[global_test], pred)
-                        )
-        n_points, weight, k = max(
-            scores,
-            key=lambda item: (
-                np.mean(scores[item]),
-                -item[0],
-                -item[1],
-                -item[2],
-            ),
-        )
-        selections.append((n_points, weight, k))
-        pred = predict_knn(
-            parameter_matrices[(n_points, weight)],
-            train_idx,
-            test_idx,
-            labels,
-            k,
-        )
-        predictions[test_idx] = pred
-        fold_rows.append(
-            {
-                "method": "Tuned MHD (nested)",
-                "fold": fold,
-                "k": k,
-                "n_test": len(test_idx),
-                "accuracy": accuracy_score(labels[test_idx], pred),
-                "balanced_accuracy": balanced_accuracy_score(labels[test_idx], pred),
-                "macro_f1": f1_score(labels[test_idx], pred, average="macro"),
-                "resample_points": n_points,
-                "velocity_weight": weight,
-            }
-        )
-
-    fold_acc = np.asarray([row["accuracy"] for row in fold_rows])
-    summary = {
-        "method": "Tuned MHD (nested)",
-        "accuracy": accuracy_score(labels, predictions),
-        "balanced_accuracy": balanced_accuracy_score(labels, predictions),
-        "macro_f1": f1_score(labels, predictions, average="macro"),
-        "fold_mean": fold_acc.mean(),
-        "fold_std": fold_acc.std(ddof=1),
-        "k_mode": Counter(k for _, _, k in selections).most_common(1)[0][0],
-        "k_selected": "/".join(str(k) for _, _, k in selections),
-        "points_selected": "/".join(str(points) for points, _, _ in selections),
-        "weight_selected": "/".join(
-            f"{weight:.2f}" for _, weight, _ in selections
-        ),
-    }
-    return summary, predictions, fold_rows
-
-
-def distance_statistics(
-    matrix: np.ndarray,
-    labels: np.ndarray,
-    groups: np.ndarray,
-    seed: int,
-    permutations: int = 1999,
-) -> dict:
-    upper = np.triu_indices(len(labels), k=1)
-    distances = matrix[upper]
-    same = labels[upper[0]] == labels[upper[1]]
-    within = distances[same]
-    between = distances[~same]
-    auc = roc_auc_score(same.astype(int), -distances)
-    observed_gap = float(between.mean() - within.mean())
-
-    unique_groups, group_inverse = np.unique(groups, return_inverse=True)
-    group_labels = np.empty(len(unique_groups), dtype=labels.dtype)
-    for group_index in range(len(unique_groups)):
-        labels_in_group = np.unique(labels[group_inverse == group_index])
-        if len(labels_in_group) != 1:
-            raise ValueError(
-                f"group {unique_groups[group_index]!r} spans multiple genre labels"
-            )
-        group_labels[group_index] = labels_in_group[0]
-
-    rng = np.random.default_rng(seed)
-    perm_gaps = np.empty(permutations)
-    for i in range(permutations):
-        shuffled = rng.permutation(group_labels)[group_inverse]
-        perm_same = shuffled[upper[0]] == shuffled[upper[1]]
-        perm_gaps[i] = (
-            distances[~perm_same].mean() - distances[perm_same].mean()
-        )
-    p_value = (1 + np.sum(perm_gaps >= observed_gap)) / (permutations + 1)
-    return {
-        "within_mean": float(within.mean()),
-        "within_median": float(np.median(within)),
-        "between_mean": float(between.mean()),
-        "between_median": float(np.median(between)),
-        "mean_gap": observed_gap,
-        "pair_auc": float(auc),
-        "permutation_p": float(p_value),
-        "permutation_count": int(permutations),
-        "permutation_groups": int(len(unique_groups)),
-        "within": within,
-        "between": between,
-    }
-
-
-def reload_curves_at_resolution(
-    labels: np.ndarray,
-    filenames: np.ndarray,
-    n_points: int,
-    workers: int,
-) -> np.ndarray:
-    """Reparse the selected MIDI files at a new grid resolution.
-
-    This avoids a second interpolation from the default 96-point curves, which
-    would otherwise confound the resampling sensitivity experiment with an
-    additional smoothing step.
-    """
-
-    def load_index(index: int) -> tuple[int, np.ndarray]:
-        path = DATA_DIR / str(labels[index]) / str(filenames[index])
-        curve, _, _, _ = load_one_midi(path, n_points=n_points)
-        return index, curve
-
-    curves = np.empty((len(labels), n_points, 3), dtype=np.float64)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(load_index, index) for index in range(len(labels))]
-        for future in as_completed(futures):
-            index, curve = future.result()
-            curves[index] = curve
-    return curves
-
-
-def run_sensitivity(
-    base_curves: np.ndarray,
-    labels: np.ndarray,
-    groups: np.ndarray,
-    filenames: np.ndarray,
-    existing_mhd: np.ndarray,
-    per_genre: int,
-    seed: int,
-    workers: int,
-) -> tuple[list[dict], dict[str, np.ndarray]]:
-    cache_path = sensitivity_cache_path(per_genre, seed)
-    cached: dict[str, np.ndarray] = {}
-    if cache_path.exists():
-        loaded = np.load(cache_path, allow_pickle=False)
-        cached = {key: loaded[key] for key in loaded.files}
-        for name, matrix in cached.items():
-            validate_distance_matrix(name, matrix)
-
-    matrices: dict[str, np.ndarray] = {}
-    point_counts = (48, 72, 96)
-    velocity_weights = (0.0, 0.10, 0.25, 0.50)
-    curve_batches: dict[int, np.ndarray] = {96: base_curves}
-
-    for n_points in point_counts:
-        for weight in velocity_weights:
-            key = f"points_{n_points}_velocity_{weight:.2f}"
-            alias = (
-                f"points_{n_points}"
-                if weight == 0.25
-                else f"velocity_{weight:.2f}"
-                if n_points == 96
-                else ""
-            )
-            if n_points == 96 and weight == 0.25:
-                matrices[key] = existing_mhd
-            elif key in cached:
-                matrices[key] = cached[key]
-            elif alias and alias in cached:
-                matrices[key] = cached[alias]
-            else:
-                if n_points not in curve_batches:
-                    curve_batches[n_points] = reload_curves_at_resolution(
-                        labels,
-                        filenames,
-                        n_points,
-                        workers,
-                    )
-                represented = np.asarray(
-                    [
-                        relative_curve(curve, weight)
-                        for curve in curve_batches[n_points]
-                    ]
-                )
-                matrices[key] = distance_family(
-                    represented,
-                    ("mhd",),
-                    workers,
-                    key,
-                )["mhd"]
-                validate_distance_matrix(key, matrices[key])
-
-    for n_points in point_counts:
-        matrices[f"points_{n_points}"] = matrices[
-            f"points_{n_points}_velocity_0.25"
-        ]
-    for weight in velocity_weights:
-        matrices[f"velocity_{weight:.2f}"] = matrices[
-            f"points_96_velocity_{weight:.2f}"
-        ]
-
-    np.savez_compressed(cache_path, **matrices)
-    rows = []
-    for n_points in point_counts:
-        summary, _, _ = evaluate_distance_metric(
-            f"MHD points={n_points}", matrices[f"points_{n_points}"], labels, groups
+            bootstrap_iterations=0,
         )
         rows.append(
             {
                 "parameter": "resample_points",
-                "value": n_points,
+                "value": points,
                 "fold_mean": summary["fold_mean"],
                 "fold_std": summary["fold_std"],
             }
         )
-    for weight in velocity_weights:
-        summary, _, _ = evaluate_distance_metric(
+    for weight in weight_values:
+        key = (base_points, weight)
+        if key not in matrices:
+            continue
+        summary, _, _, _ = evaluate_distance_metric(
             f"MHD velocity={weight:.2f}",
-            matrices[f"velocity_{weight:.2f}"],
+            matrices[key],
             labels,
             groups,
+            inner_seeds=inner_seeds,
+            bootstrap_iterations=0,
         )
         rows.append(
             {
@@ -811,443 +150,434 @@ def run_sensitivity(
                 "fold_std": summary["fold_std"],
             }
         )
-    return rows, matrices
-
-
-def run_repeated_validation(
-    mhd_matrix: np.ndarray,
-    parameter_matrices: dict[tuple[int, float], np.ndarray],
-    features: np.ndarray,
-    labels: np.ndarray,
-    groups: np.ndarray,
-    outer_seeds: tuple[int, ...] = REPEAT_OUTER_SEEDS,
-) -> tuple[list[dict], list[dict]]:
-    rows: list[dict] = []
-    for outer_seed in outer_seeds:
-        mhd_summary, _, _ = evaluate_distance_metric(
-            "MHD relative TPV",
-            mhd_matrix,
-            labels,
-            groups,
-            outer_seed=outer_seed,
-        )
-        tuned_summary, _, _ = evaluate_tuned_mhd(
-            parameter_matrices,
-            labels,
-            groups,
-            outer_seed=outer_seed,
-        )
-        rf_summary, _, _, _ = evaluate_random_forest(
-            features,
-            labels,
-            groups,
-            outer_seed=outer_seed,
-            compute_importance=False,
-        )
-        for summary in (mhd_summary, tuned_summary, rf_summary):
-            rows.append(
-                {
-                    "method": summary["method"],
-                    "outer_seed": outer_seed,
-                    "accuracy": summary["accuracy"],
-                    "balanced_accuracy": summary["balanced_accuracy"],
-                    "macro_f1": summary["macro_f1"],
-                    "fold_mean": summary["fold_mean"],
-                    "fold_std": summary["fold_std"],
-                }
-            )
-
-    aggregate_rows = []
-    for method in ("MHD relative TPV", "Tuned MHD (nested)", "RF descriptors"):
-        selected = [row for row in rows if row["method"] == method]
-        accuracy = np.asarray([row["accuracy"] for row in selected])
-        macro_f1 = np.asarray([row["macro_f1"] for row in selected])
-        aggregate_rows.append(
-            {
-                "method": method,
-                "repeats": len(selected),
-                "accuracy_mean": accuracy.mean(),
-                "accuracy_std": accuracy.std(ddof=1),
-                "accuracy_min": accuracy.min(),
-                "accuracy_max": accuracy.max(),
-                "macro_f1_mean": macro_f1.mean(),
-                "macro_f1_std": macro_f1.std(ddof=1),
-            }
-        )
-    return rows, aggregate_rows
-
-
-def genre_mean_matrix(matrix: np.ndarray, labels: np.ndarray) -> np.ndarray:
-    result = np.zeros((len(GENRES), len(GENRES)))
-    for i, genre_a in enumerate(GENRES):
-        idx_a = np.flatnonzero(labels == genre_a)
-        for j, genre_b in enumerate(GENRES):
-            idx_b = np.flatnonzero(labels == genre_b)
-            block = matrix[np.ix_(idx_a, idx_b)]
-            if i == j:
-                block = block[np.triu_indices_from(block, k=1)]
-            result[i, j] = block.mean()
-    return result
-
-
-def synthetic_robustness() -> list[dict]:
-    t = np.linspace(0, 1, 96)
-    base = np.column_stack((t, 0.55 * np.sin(4 * np.pi * t), np.zeros_like(t)))
-    rows = []
-    for amplitude in np.linspace(0, 2.0, 11):
-        perturbed = base.copy()
-        perturbed[48, 1] += amplitude
-        hd, q95, mhd = nearest_distance_summaries(base, perturbed)
-        rows.append(
-            {
-                "outlier_amplitude": amplitude,
-                "hd": hd,
-                "q95": q95,
-                "mhd": mhd,
-            }
-        )
     return rows
 
 
-def plot_workflow() -> None:
-    fig, ax = plt.subplots(figsize=(12, 2.8))
-    ax.axis("off")
-    labels = [
-        "MIDI",
-        "Skyline\nmelody",
-        "Time-grid\nresampling",
-        "Scaled 3D\ncurve",
-        "Hausdorff\nfamily",
-        "Grouped\nvalidation",
-    ]
-    xs = np.linspace(0.07, 0.93, len(labels))
-    for x, label in zip(xs, labels):
-        ax.text(
-            x,
-            0.5,
-            label,
-            ha="center",
-            va="center",
-            fontsize=11,
-            bbox=dict(boxstyle="round,pad=0.5", fc="#EAF2F8", ec="#2E75B6"),
-        )
-    for left, right in zip(xs[:-1], xs[1:]):
-        ax.annotate(
-            "",
-            xy=(right - 0.055, 0.5),
-            xytext=(left + 0.055, 0.5),
-            arrowprops=dict(arrowstyle="->", lw=1.5, color="#555555"),
-        )
-    fig.savefig(FIGURE_DIR / "workflow.png", dpi=220, bbox_inches="tight")
-    plt.close(fig)
+def latex_number(value: float, digits: int = 2) -> str:
+    return f"{value:.{digits}f}"
 
 
-def plot_example_curves(curves: np.ndarray, labels: np.ndarray) -> None:
-    fig = plt.figure(figsize=(13, 8))
-    for index, genre in enumerate(GENRES, start=1):
-        ax = fig.add_subplot(2, 3, index, projection="3d")
-        curve = relative_curve(curves[np.flatnonzero(labels == genre)[0]], 0.25)
-        ax.plot(curve[:, 0], curve[:, 1], curve[:, 2], color=COLORS[genre], lw=1.5)
-        ax.scatter(curve[::6, 0], curve[::6, 1], curve[::6, 2], s=8)
-        ax.set_title(genre)
-        ax.set_xlabel("phase")
-        ax.set_ylabel("relative pitch")
-        ax.set_zlabel("velocity")
-    fig.suptitle("Representative normalized melody curves")
-    fig.tight_layout()
-    fig.savefig(FIGURE_DIR / "example_curves.png", dpi=200, bbox_inches="tight")
-    plt.close(fig)
+def model_by_name(summaries: list[dict], method: str) -> dict:
+    return next(row for row in summaries if row["method"] == method)
 
 
-def plot_distance_distribution(stats_row: dict) -> None:
-    within = stats_row["within"]
-    between = stats_row["between"]
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
-    bins = np.linspace(
-        min(within.min(), between.min()), max(within.max(), between.max()), 45
+def write_latex_values(
+    dataset: dict[str, np.ndarray],
+    summaries: list[dict],
+    statistics: dict,
+    repeated_summary: list[dict],
+    significance: list[dict],
+) -> None:
+    actual = int(dataset["per_genre_actual"])
+    tuned = model_by_name(summaries, "Tuned MHD (nested)")
+    dtw = model_by_name(summaries, "Multivariate DTW (nested)")
+    logistic = model_by_name(summaries, "Multinomial logistic descriptors")
+    rf = model_by_name(summaries, "RF descriptors")
+    fusion = model_by_name(summaries, "MHD-RF probability fusion")
+    phase = model_by_name(summaries, "Phase-aligned trajectory RMSE")
+    repeated = {row["method"]: row for row in repeated_summary}
+    audit_total = next(
+        row
+        for row in read_csv(TABLE_DIR / "data_audit_summary.csv")
+        if row["genre"] == "TOTAL"
     )
-    axes[0].hist(within, bins=bins, density=True, alpha=0.65, label="within")
-    axes[0].hist(between, bins=bins, density=True, alpha=0.65, label="between")
-    axes[0].set_xlabel("Modified Hausdorff distance")
-    axes[0].set_ylabel("density")
-    axes[0].legend()
-    axes[0].grid(alpha=0.2)
-    axes[1].boxplot([within, between], tick_labels=["within", "between"], showfliers=False)
-    axes[1].set_ylabel("Modified Hausdorff distance")
-    axes[1].grid(alpha=0.2)
-    fig.tight_layout()
-    fig.savefig(FIGURE_DIR / "distance_distribution.png", dpi=220, bbox_inches="tight")
-    plt.close(fig)
+    model_commands = {
+        "HDLocal": model_by_name(summaries, "HD local min-max"),
+        "HDTP": model_by_name(summaries, "HD relative TP"),
+        "HDTPV": model_by_name(summaries, "HD relative TPV"),
+        "QHD": model_by_name(summaries, "Q95-HD relative TPV"),
+        "FixedMHD": model_by_name(summaries, "MHD relative TPV"),
+        "PhaseRMSE": phase,
+        "TunedMHD": tuned,
+        "DTW": dtw,
+        "Logistic": logistic,
+        "RF": rf,
+        "Fusion": fusion,
+    }
 
+    commands = {
+        "PipelineVersion": PIPELINE_VERSION,
+        "SampleCount": str(len(dataset["labels"])),
+        "PerGenreCount": str(actual),
+        "CrossGenreGroupCount": str(int(dataset["cross_genre_group_count"])),
+        "RawFileCount": audit_total["raw_files"],
+        "FingerprintFailureCount": audit_total["fingerprint_failures"],
+        "TitleDuplicateSetCount": audit_total["title_duplicate_sets"],
+        "MelodyDuplicateSetCount": audit_total["melody_duplicate_sets"],
+        "UnionGroupCount": audit_total["union_groups"],
+        "CrossGenreFileCount": audit_total["cross_genre_files"],
+        "WithinMHD": latex_number(statistics["within_mean"], 4),
+        "BetweenMHD": latex_number(statistics["between_mean"], 4),
+        "MHDGap": latex_number(statistics["mean_gap"], 4),
+        "PairAUC": latex_number(statistics["pair_auc"], 4),
+        "PermutationP": latex_number(statistics["permutation_p"], 4),
+        "PermutationCount": str(statistics["permutation_count"]),
+        "TunedMHDAcc": latex_number(100 * tuned["accuracy"]),
+        "TunedMHDLow": latex_number(100 * tuned["accuracy_ci_low"]),
+        "TunedMHDHigh": latex_number(100 * tuned["accuracy_ci_high"]),
+        "DTWAcc": latex_number(100 * dtw["accuracy"]),
+        "PhaseRMSEAcc": latex_number(100 * phase["accuracy"]),
+        "LogisticAcc": latex_number(100 * logistic["accuracy"]),
+        "RFAcc": latex_number(100 * rf["accuracy"]),
+        "RFLow": latex_number(100 * rf["accuracy_ci_low"]),
+        "RFHigh": latex_number(100 * rf["accuracy_ci_high"]),
+        "FusionAcc": latex_number(100 * fusion["accuracy"]),
+        "FusionLow": latex_number(100 * fusion["accuracy_ci_low"]),
+        "FusionHigh": latex_number(100 * fusion["accuracy_ci_high"]),
+        "RepeatedMHDAcc": latex_number(
+            100 * repeated["Tuned MHD (nested)"]["accuracy_mean"]
+        ),
+        "RepeatedRFAcc": latex_number(
+            100 * repeated["RF descriptors"]["accuracy_mean"]
+        ),
+        "RepeatedFusionAcc": latex_number(
+            100 * repeated["MHD-RF probability fusion"]["accuracy_mean"]
+        ),
+        "RepeatedMHDStd": latex_number(
+            100 * repeated["Tuned MHD (nested)"]["accuracy_std"]
+        ),
+        "RepeatedRFStd": latex_number(
+            100 * repeated["RF descriptors"]["accuracy_std"]
+        ),
+        "RepeatedFusionStd": latex_number(
+            100 * repeated["MHD-RF probability fusion"]["accuracy_std"]
+        ),
+    }
+    for prefix, row in model_commands.items():
+        commands[f"{prefix}Acc"] = latex_number(100 * row["accuracy"])
+        commands[f"{prefix}Low"] = latex_number(100 * row["accuracy_ci_low"])
+        commands[f"{prefix}High"] = latex_number(100 * row["accuracy_ci_high"])
+        commands[f"{prefix}FOne"] = latex_number(row["macro_f1"], 3)
 
-def plot_heatmap(values: np.ndarray) -> None:
-    fig, ax = plt.subplots(figsize=(7, 6))
-    image = ax.imshow(values, cmap="YlGnBu")
-    ax.set_xticks(range(len(GENRES)), GENRES, rotation=35, ha="right")
-    ax.set_yticks(range(len(GENRES)), GENRES)
-    for i in range(len(GENRES)):
-        for j in range(len(GENRES)):
-            ax.text(j, i, f"{values[i, j]:.3f}", ha="center", va="center", fontsize=9)
-    fig.colorbar(image, ax=ax, label="mean Modified Hausdorff distance")
-    ax.set_title("Genre-level mean distance")
-    fig.tight_layout()
-    fig.savefig(FIGURE_DIR / "genre_distance_heatmap.png", dpi=220, bbox_inches="tight")
-    plt.close(fig)
-
-
-def plot_mds(matrix: np.ndarray, labels: np.ndarray) -> None:
-    embedding = MDS(
-        n_components=2,
-        dissimilarity="precomputed",
-        random_state=42,
-        normalized_stress="auto",
-        n_init=2,
-        max_iter=300,
-    ).fit_transform(matrix)
-    fig, ax = plt.subplots(figsize=(8, 6))
-    for genre in GENRES:
-        mask = labels == genre
-        ax.scatter(
-            embedding[mask, 0],
-            embedding[mask, 1],
-            s=25,
-            alpha=0.7,
-            label=genre,
-            color=COLORS[genre],
+    comparison_rows = {
+        (row["model_a"], row["model_b"]): row for row in significance
+    }
+    if comparison_rows:
+        mhd_rf = comparison_rows[("Tuned MHD (nested)", "RF descriptors")]
+        rf_fusion = comparison_rows[
+            ("RF descriptors", "MHD-RF probability fusion")
+        ]
+        commands["MHDvsRFHolmP"] = (
+            "<0.0001"
+            if mhd_rf["holm_adjusted_p"] < 0.0001
+            else latex_number(mhd_rf["holm_adjusted_p"], 4)
         )
-    ax.set_xlabel("MDS 1")
-    ax.set_ylabel("MDS 2")
-    ax.set_title("MDS projection of Modified Hausdorff distances")
-    ax.legend()
-    ax.grid(alpha=0.2)
-    fig.tight_layout()
-    fig.savefig(FIGURE_DIR / "mds_mhd.png", dpi=220, bbox_inches="tight")
-    plt.close(fig)
-
-
-def plot_model_comparison(summaries: list[dict]) -> None:
-    fig, ax = plt.subplots(figsize=(10, 5))
-    names = [row["method"] for row in summaries]
-    means = [row["fold_mean"] for row in summaries]
-    stds = [row["fold_std"] for row in summaries]
-    colors = [
-        "#A5A5A5",
-        "#5B9BD5",
-        "#4472C4",
-        "#ED7D31",
-        "#70AD47",
-        "#7030A0",
-        "#C55A11",
-        "#1F4E78",
+        commands["RFvsFusionHolmP"] = latex_number(
+            rf_fusion["holm_adjusted_p"], 4
+        )
+    recall_prefixes = {
+        "Tuned MHD (nested)": "TunedMHD",
+        "RF descriptors": "RF",
+        "MHD-RF probability fusion": "Fusion",
+    }
+    for row in read_csv(TABLE_DIR / "class_recall.csv"):
+        prefix = recall_prefixes.get(row["method"])
+        if prefix is not None:
+            commands[f"{prefix}{row['genre']}Recall"] = latex_number(
+                100 * float(row["recall"])
+            )
+    lines = [
+        "% Auto-generated by code/final_experiment.py. Do not edit manually."
     ]
-    bars = ax.bar(range(len(names)), means, yerr=stds, capsize=4, color=colors[: len(names)])
-    ax.axhline(0.2, color="black", linestyle="--", lw=1, label="random baseline")
-    ax.set_xticks(range(len(names)), names, rotation=25, ha="right")
-    ax.set_ylabel("5-fold grouped-CV accuracy")
-    ax.set_ylim(0, max(means) + max(stds) + 0.12)
-    ax.grid(axis="y", alpha=0.2)
-    for bar, value in zip(bars, means):
-        ax.text(bar.get_x() + bar.get_width() / 2, value + 0.015, f"{value:.3f}", ha="center")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(FIGURE_DIR / "model_comparison.png", dpi=220, bbox_inches="tight")
-    plt.close(fig)
+    for name, value in commands.items():
+        lines.append(f"\\newcommand{{\\{name}}}{{{value}}}")
+    LATEX_VALUES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def plot_confusion(labels: np.ndarray, predictions: np.ndarray, filename: str) -> None:
-    cm = confusion_matrix(labels, predictions, labels=GENRES, normalize="true")
-    fig, ax = plt.subplots(figsize=(7, 6))
-    image = ax.imshow(cm, cmap="Blues", vmin=0, vmax=max(0.5, cm.max()))
-    ax.set_xticks(range(len(GENRES)), GENRES, rotation=35, ha="right")
-    ax.set_yticks(range(len(GENRES)), GENRES)
-    ax.set_xlabel("predicted")
-    ax.set_ylabel("true")
-    for i in range(len(GENRES)):
-        for j in range(len(GENRES)):
-            ax.text(j, i, f"{cm[i, j]*100:.0f}%", ha="center", va="center")
-    fig.colorbar(image, ax=ax)
-    fig.tight_layout()
-    fig.savefig(FIGURE_DIR / filename, dpi=220, bbox_inches="tight")
-    plt.close(fig)
+def json_ready_statistics(statistics: dict) -> dict:
+    return {
+        key: value
+        for key, value in statistics.items()
+        if key not in {"within", "between"}
+    }
 
 
-def plot_synthetic(rows: list[dict]) -> None:
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    x = [row["outlier_amplitude"] for row in rows]
-    for key, label in [("hd", "max-HD"), ("q95", "Q95-HD"), ("mhd", "MHD")]:
-        ax.plot(x, [row[key] for row in rows], marker="o", label=label)
-    ax.set_xlabel("single-point perturbation amplitude")
-    ax.set_ylabel("distance from original curve")
-    ax.set_title("Robustness to one outlying note")
-    ax.legend()
-    ax.grid(alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(FIGURE_DIR / "synthetic_robustness.png", dpi=220, bbox_inches="tight")
-    plt.close(fig)
-
-
-def plot_feature_importance(importances: np.ndarray, names: np.ndarray) -> None:
-    top = np.argsort(importances)[-12:]
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.barh(range(len(top)), importances[top], color="#70AD47")
-    ax.set_yticks(range(len(top)), names[top])
-    ax.set_xlabel("held-out balanced-accuracy decrease")
-    ax.set_title("Random-forest permutation importance")
-    ax.grid(axis="x", alpha=0.2)
-    fig.tight_layout()
-    fig.savefig(FIGURE_DIR / "feature_importance.png", dpi=220, bbox_inches="tight")
-    plt.close(fig)
-
-
-def plot_sensitivity(rows: list[dict]) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
-    for ax, parameter, title, xlabel in [
-        (axes[0], "resample_points", "Resampling sensitivity", "number of points"),
-        (axes[1], "velocity_weight", "Velocity-weight sensitivity", "velocity weight"),
-    ]:
-        selected = [row for row in rows if row["parameter"] == parameter]
-        x = np.asarray([float(row["value"]) for row in selected])
-        y = np.asarray([float(row["fold_mean"]) for row in selected])
-        error = np.asarray([float(row["fold_std"]) for row in selected])
-        ax.errorbar(x, y, yerr=error, marker="o", capsize=4, color="#4472C4")
-        ax.axhline(0.2, color="black", linestyle="--", lw=1)
-        ax.set_title(title)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel("grouped-CV accuracy")
-        ax.grid(alpha=0.2)
-    fig.tight_layout()
-    fig.savefig(FIGURE_DIR / "sensitivity.png", dpi=220, bbox_inches="tight")
-    plt.close(fig)
+def run_signature(summary: dict, predictions: dict[str, np.ndarray]) -> str:
+    values = [json.dumps(summary["models"], sort_keys=True, ensure_ascii=True)]
+    for name in sorted(predictions):
+        values.extend(str(value) for value in predictions[name])
+    return combined_digest(values)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--per-genre", type=int, default=80)
+    parser = argparse.ArgumentParser(
+        description="Leakage-safe melody geometry experiment (pipeline v3)"
+    )
+    parser.add_argument("--per-genre", type=int, default=100)
     parser.add_argument("--points", type=int, default=96)
     parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--workers", type=int, default=max(2, min(8, os.cpu_count() or 2)))
-    parser.add_argument("--rebuild-data", action="store_true")
-    parser.add_argument("--rebuild-distances", action="store_true")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(2, min(16, os.cpu_count() or 2)),
+    )
+    parser.add_argument("--quick", action="store_true")
+    parser.add_argument("--force-recompute", action="store_true")
+    parser.add_argument("--rebuild-data", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--rebuild-distances", action="store_true", help=argparse.SUPPRESS
+    )
     args = parser.parse_args()
+    force = args.force_recompute or args.rebuild_data or args.rebuild_distances
+
+    if args.quick:
+        requested_per_genre = min(args.per_genre, 12)
+        base_points = min(args.points, 48)
+        inner_seeds = (2026,)
+        repeat_seeds = (42,)
+        bootstrap_iterations = 300
+        mhd_points = tuple(sorted({24, 36, base_points}))
+        mhd_weights = (0.0, 0.25, 0.50)
+        dtw_points = (24, 36)
+        dtw_weights = (0.0, 0.50)
+        dtw_windows = (0.15,)
+        n_estimators = 120
+    else:
+        requested_per_genre = args.per_genre
+        base_points = args.points
+        inner_seeds = INNER_SEEDS
+        repeat_seeds = REPEAT_OUTER_SEEDS
+        bootstrap_iterations = 2000
+        mhd_points = (48, 72, 96)
+        mhd_weights = (0.0, 0.10, 0.25, 0.50)
+        dtw_points = (36, 48)
+        dtw_weights = (0.0, 0.25, 0.50)
+        dtw_windows = (0.10, 0.20)
+        n_estimators = 500
 
     ensure_dirs()
-    print(f"[config] genres={GENRES}, per_genre={args.per_genre}, points={args.points}")
+    started = time.time()
+    config = {
+        "pipeline_version": PIPELINE_VERSION,
+        "genres": list(GENRES),
+        "requested_per_genre": requested_per_genre,
+        "base_points": base_points,
+        "seed": args.seed,
+        "workers": args.workers,
+        "quick": args.quick,
+        "force_recompute": force,
+        "inner_seeds": list(inner_seeds),
+        "outer_seeds": list(repeat_seeds),
+        "bootstrap_iterations": bootstrap_iterations,
+        "mhd_grid": {
+            "points": list(mhd_points),
+            "velocity_weights": list(mhd_weights),
+            "k": [1, 3, 5, 7, 9],
+        },
+        "dtw_grid": {
+            "points": list(dtw_points),
+            "velocity_weights": list(dtw_weights),
+            "window_fractions": list(dtw_windows),
+            "k": [1, 3, 5, 7, 9],
+        },
+        "fusion_rf_weights": [0.25, 0.50, 0.75],
+        "primary_outer_seed": 42,
+    }
+    CONFIG_FILE.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2, allow_nan=False),
+        encoding="utf-8",
+    )
+    initial_environment = environment_snapshot(ROOT)
+    print(
+        f"[config] v3, target={requested_per_genre}/genre, "
+        f"points={base_points}, quick={args.quick}"
+    )
+
     dataset = sample_dataset(
-        args.per_genre, args.points, args.seed, rebuild=args.rebuild_data
+        requested_per_genre,
+        base_points,
+        args.seed,
+        args.workers,
+        force=force,
     )
     curves = dataset["curves"]
     labels = dataset["labels"]
     groups = dataset["groups"]
-    filenames = dataset["filenames"]
     features = dataset["features"]
+    filenames = dataset["filenames"]
+    actual_per_genre = int(dataset["per_genre_actual"])
 
-    matrices = compute_distances(
+    base_matrices = compute_base_distances(
         curves,
-        args.per_genre,
-        args.points,
+        actual_per_genre,
+        base_points,
         args.seed,
         args.workers,
-        rebuild=args.rebuild_distances,
+        force=force,
+    )
+    mhd_matrices = build_mhd_grid(
+        curves,
+        labels,
+        filenames,
+        base_matrices["mhd_tpv"],
+        actual_per_genre,
+        args.seed,
+        args.workers,
+        point_counts=mhd_points,
+        velocity_weights=mhd_weights,
+        force=force,
+    )
+    dtw_matrices = build_dtw_grid(
+        labels,
+        filenames,
+        actual_per_genre,
+        args.seed,
+        args.workers,
+        point_counts=dtw_points,
+        velocity_weights=dtw_weights,
+        window_fractions=dtw_windows,
+        force=force,
     )
 
-    method_names = {
+    summaries: list[dict] = []
+    fold_rows: list[dict] = []
+    predictions: dict[str, np.ndarray] = {}
+    probabilities: dict[str, np.ndarray] = {}
+    baseline_methods = {
         "hd_local": "HD local min-max",
         "hd_tp": "HD relative TP",
         "hd_tpv": "HD relative TPV",
         "q95_tpv": "Q95-HD relative TPV",
         "mhd_tpv": "MHD relative TPV",
-        "dtw_pitch": "DTW relative pitch",
+        "phase_rmse": "Phase-aligned trajectory RMSE",
     }
-
-    summaries = []
-    fold_rows: list[dict] = []
-    predictions_by_method = {}
-    for key in method_names:
-        summary, predictions, folds = evaluate_distance_metric(
-            method_names[key], matrices[key], labels, groups
+    for key, method in baseline_methods.items():
+        summary, prediction, probability, folds = evaluate_distance_metric(
+            method,
+            base_matrices[key],
+            labels,
+            groups,
+            inner_seeds=inner_seeds,
+            bootstrap_iterations=bootstrap_iterations,
         )
         summaries.append(summary)
-        predictions_by_method[key] = predictions
-        fold_rows.extend(folds.tolist())
-        print(
-            f"[eval] {summary['method']}: {summary['fold_mean']:.4f} "
-            f"+/- {summary['fold_std']:.4f}, k={summary['k_selected']}"
-        )
+        fold_rows.extend(folds)
+        predictions[method] = prediction
+        probabilities[method] = probability
+        print(f"[eval] {method}: {summary['accuracy']:.4f}")
 
-    stats_row = distance_statistics(
-        matrices["mhd_tpv"],
+    tuned_mhd, tuned_prediction, tuned_probability, tuned_folds = evaluate_tuned_mhd(
+        mhd_matrices,
         labels,
         groups,
-        args.seed,
+        inner_seeds=inner_seeds,
+        bootstrap_iterations=bootstrap_iterations,
     )
-    genre_matrix = genre_mean_matrix(matrices["mhd_tpv"], labels)
-    synthetic_rows = synthetic_robustness()
-    sensitivity_rows, sensitivity_matrices = run_sensitivity(
-        curves,
-        labels,
-        groups,
-        filenames,
-        matrices["mhd_tpv"],
-        args.per_genre,
-        args.seed,
-        args.workers,
-    )
-    parameter_matrices = {
-        (n_points, weight): sensitivity_matrices[
-            f"points_{n_points}_velocity_{weight:.2f}"
-        ]
-        for n_points in (48, 72, 96)
-        for weight in (0.0, 0.10, 0.25, 0.50)
-    }
-    tuned_summary, tuned_predictions, tuned_folds = evaluate_tuned_mhd(
-        parameter_matrices, labels, groups
-    )
-    summaries.append(tuned_summary)
+    summaries.append(tuned_mhd)
     fold_rows.extend(tuned_folds)
-    predictions_by_method["tuned_mhd"] = tuned_predictions
-    method_names["tuned_mhd"] = "Tuned MHD (nested)"
-    print(
-        f"[eval] Tuned MHD (nested): {tuned_summary['fold_mean']:.4f} "
-        f"+/- {tuned_summary['fold_std']:.4f}, "
-        f"points={tuned_summary['points_selected']}, "
-        f"weights={tuned_summary['weight_selected']}"
-    )
+    predictions[tuned_mhd["method"]] = tuned_prediction
+    probabilities[tuned_mhd["method"]] = tuned_probability
 
-    rf_summary, rf_predictions, rf_folds, importances = evaluate_random_forest(
-        features, labels, groups
+    tuned_dtw, dtw_prediction, dtw_probability, dtw_folds = evaluate_tuned_dtw(
+        dtw_matrices,
+        labels,
+        groups,
+        inner_seeds=inner_seeds,
+        bootstrap_iterations=bootstrap_iterations,
     )
-    summaries.append(rf_summary)
+    summaries.append(tuned_dtw)
+    fold_rows.extend(dtw_folds)
+    predictions[tuned_dtw["method"]] = dtw_prediction
+    probabilities[tuned_dtw["method"]] = dtw_probability
+
+    logistic, logistic_prediction, logistic_probability, logistic_folds = (
+        evaluate_logistic_regression(
+            features,
+            labels,
+            groups,
+            inner_seeds=inner_seeds,
+            bootstrap_iterations=bootstrap_iterations,
+        )
+    )
+    summaries.append(logistic)
+    fold_rows.extend(logistic_folds)
+    predictions[logistic["method"]] = logistic_prediction
+    probabilities[logistic["method"]] = logistic_probability
+
+    rf, rf_prediction, rf_probability, rf_folds, importances = (
+        evaluate_random_forest(
+            features,
+            labels,
+            groups,
+            bootstrap_iterations=bootstrap_iterations,
+            n_estimators=n_estimators,
+        )
+    )
+    summaries.append(rf)
     fold_rows.extend(rf_folds)
-    predictions_by_method["rf"] = rf_predictions
-    print(
-        f"[eval] RF descriptors: {rf_summary['fold_mean']:.4f} "
-        f"+/- {rf_summary['fold_std']:.4f}"
-    )
+    predictions[rf["method"]] = rf_prediction
+    probabilities[rf["method"]] = rf_probability
 
-    repeated_rows, repeated_summary = run_repeated_validation(
-        matrices["mhd_tpv"],
-        parameter_matrices,
+    fusion, fusion_prediction, fusion_probability, fusion_folds = evaluate_fusion(
+        mhd_matrices,
         features,
         labels,
         groups,
+        inner_seeds=inner_seeds,
+        bootstrap_iterations=bootstrap_iterations,
+        n_estimators=n_estimators,
+    )
+    summaries.append(fusion)
+    fold_rows.extend(fusion_folds)
+    predictions[fusion["method"]] = fusion_prediction
+    probabilities[fusion["method"]] = fusion_probability
+
+    statistics = distance_statistics(
+        base_matrices["mhd_tpv"],
+        labels,
+        groups,
+        args.seed,
+        permutations=999 if args.quick else 9999,
+    )
+    sensitivity = sensitivity_rows(
+        mhd_matrices, labels, groups, base_points, inner_seeds
+    )
+    ablation = feature_ablation(
+        features,
+        dataset["feature_names"],
+        labels,
+        groups,
+        n_estimators=max(120, n_estimators - 100),
+    )
+    primary_predictions = {
+        method: predictions[method]
+        for method in (
+            "Tuned MHD (nested)",
+            "RF descriptors",
+            "MHD-RF probability fusion",
+        )
+    }
+    significance = mcnemar_holm(labels, primary_predictions)
+    repeated_rows, repeated_summary = repeated_validation(
+        mhd_matrices,
+        features,
+        labels,
+        groups,
+        outer_seeds=repeat_seeds,
+        inner_seeds=inner_seeds,
+        n_estimators=max(120, n_estimators - 100),
+    )
+    genre_matrix = genre_mean_matrix(base_matrices["mhd_tpv"], labels)
+    synthetic = synthetic_robustness()
+    recalls = class_recall_rows(labels, primary_predictions)
+    diagnostics = disagreement_rows(
+        filenames,
+        labels,
+        primary_predictions,
+        {method: probabilities[method] for method in primary_predictions},
     )
 
     save_csv(TABLE_DIR / "model_summary.csv", summaries)
     save_csv(TABLE_DIR / "fold_results.csv", fold_rows)
-    save_csv(
-        TABLE_DIR / "distance_statistics.csv",
-        [
-            {
-                key: value
-                for key, value in stats_row.items()
-                if key not in ("within", "between")
-            }
-        ],
-    )
-    save_csv(TABLE_DIR / "synthetic_robustness.csv", synthetic_rows)
-    save_csv(TABLE_DIR / "sensitivity.csv", sensitivity_rows)
+    save_csv(TABLE_DIR / "sensitivity.csv", sensitivity)
+    save_csv(TABLE_DIR / "feature_ablation.csv", ablation)
+    save_csv(TABLE_DIR / "mcnemar_holm.csv", significance)
+    save_csv(TABLE_DIR / "class_recall.csv", recalls)
+    save_csv(TABLE_DIR / "model_disagreements.csv", diagnostics)
     save_csv(TABLE_DIR / "repeated_validation.csv", repeated_rows)
     save_csv(TABLE_DIR / "repeated_validation_summary.csv", repeated_summary)
+    save_csv(TABLE_DIR / "synthetic_robustness.csv", synthetic)
+    save_csv(TABLE_DIR / "distance_statistics.csv", [json_ready_statistics(statistics)])
     np.savetxt(
         TABLE_DIR / "genre_mean_distance.csv",
         genre_matrix,
@@ -1256,47 +586,119 @@ def main() -> None:
         comments="",
     )
 
-    best_hd_key = max(
-        ("hd_local", "hd_tp", "hd_tpv", "q95_tpv", "mhd_tpv", "tuned_mhd"),
-        key=lambda key: next(
-            row["fold_mean"] for row in summaries if row["method"] == method_names[key]
-        ),
-    )
-    run_summary = {
-        "config": vars(args),
-        "pipeline_version": PIPELINE_VERSION,
-        "genres": GENRES,
-        "n_samples": int(len(labels)),
-        "class_counts": {genre: int(np.sum(labels == genre)) for genre in GENRES},
-        "unique_groups": int(len(np.unique(groups))),
-        "excluded_cross_genre_groups": int(dataset["cross_genre_title_count"]),
-        "best_hausdorff_method": method_names[best_hd_key],
-        "distance_statistics_mhd": {
-            key: value
-            for key, value in stats_row.items()
-            if key not in ("within", "between")
-        },
-        "models": summaries,
-        "sensitivity": sensitivity_rows,
-        "repeated_validation": repeated_summary,
+    prediction_payload = {
+        "labels": labels,
+        "filenames": filenames,
+        "feature_names": dataset["feature_names"],
+        "rf_importances": importances,
     }
-    (RESULTS_DIR / "summary.json").write_text(
-        json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    for method, values in predictions.items():
+        key = (
+            method.lower()
+            .replace("-", "_")
+            .replace(" ", "_")
+            .replace("(", "")
+            .replace(")", "")
+        )
+        prediction_payload[f"{key}_predictions"] = values
+        prediction_payload[f"{key}_probabilities"] = probabilities[method]
+    np.savez_compressed(PREDICTION_FILE, **prediction_payload)
+
+    summary = {
+        "config": config,
+        "pipeline_version": PIPELINE_VERSION,
+        "genres": list(GENRES),
+        "n_samples": len(labels),
+        "per_genre_actual": actual_per_genre,
+        "class_counts": {
+            genre: int(np.sum(labels == genre)) for genre in GENRES
+        },
+        "unique_groups": len(np.unique(groups)),
+        "excluded_cross_genre_groups": int(dataset["cross_genre_group_count"]),
+        "primary_geometry_model": "Tuned MHD (nested)",
+        "distance_statistics_mhd": json_ready_statistics(statistics),
+        "models": summaries,
+        "sensitivity": sensitivity,
+        "feature_ablation": ablation,
+        "mcnemar_holm": significance,
+        "repeated_validation": repeated_summary,
+        "runtime_seconds": time.time() - started,
+    }
+    signature = run_signature(summary, primary_predictions)
+    signature_path = RESULTS_DIR / "determinism_signature.json"
+    previous_signature = None
+    if signature_path.exists():
+        previous_signature = json.loads(
+            signature_path.read_text(encoding="utf-8")
+        ).get("signature")
+    determinism = {
+        "signature": signature,
+        "previous_signature": previous_signature,
+        "matches_previous_run": (
+            None if previous_signature is None else signature == previous_signature
+        ),
+    }
+    signature_path.write_text(
+        json.dumps(determinism, indent=2), encoding="utf-8"
+    )
+    summary["determinism"] = determinism
+    SUMMARY_FILE.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False),
+        encoding="utf-8",
+    )
+    write_latex_values(
+        dataset, summaries, statistics, repeated_summary, significance
     )
 
-    plot_workflow()
-    plot_example_curves(curves, labels)
-    plot_distance_distribution(stats_row)
-    plot_heatmap(genre_matrix)
-    plot_mds(matrices["mhd_tpv"], labels)
-    plot_model_comparison(summaries)
-    plot_confusion(labels, predictions_by_method[best_hd_key], "confusion_best_hd.png")
-    plot_confusion(labels, rf_predictions, "confusion_rf.png")
-    plot_synthetic(synthetic_rows)
-    plot_feature_importance(importances, dataset["feature_names"])
-    plot_sensitivity(sensitivity_rows)
+    manifest = {
+        "purpose": (
+            "Final course-paper evaluation of leakage-safe melody geometry, "
+            "descriptor, and fusion models."
+        ),
+        "decision_owner": "project author",
+        "model_selection_rationale": (
+            "Tuned MHD is the prespecified primary geometry model; other distance "
+            "families are controls. RF and probability fusion test complementary "
+            "descriptor information without replacing the Hausdorff research question."
+        ),
+        "command": " ".join(sys.argv),
+        "config": config,
+        "environment_at_start": initial_environment,
+        "environment_at_end": environment_snapshot(ROOT),
+        "data": {
+            "dataset_root": str(DATA_DIR),
+            "selected_file_digest": combined_digest(dataset["file_sha256"].tolist()),
+            "selected_melody_digest": combined_digest(
+                dataset["melody_fingerprints"].tolist()
+            ),
+            "selected_samples": len(labels),
+            "unique_groups": len(np.unique(groups)),
+        },
+        "metrics_file": str(SUMMARY_FILE.relative_to(ROOT)),
+        "runtime_seconds": time.time() - started,
+        "artifacts": artifact_inventory(
+            [
+                SUMMARY_FILE,
+                CONFIG_FILE,
+                PREDICTION_FILE,
+                LATEX_VALUES_FILE,
+                TABLE_DIR,
+            ],
+            ROOT,
+        ),
+        "known_limits": [
+            "single ADL Piano MIDI corpus",
+            "skyline melody is a heuristic voice extractor",
+            "genre labels are broad and potentially noisy",
+            "the study supports predictive association, not causal interpretation",
+        ],
+    }
+    write_manifest(MANIFEST_FILE, manifest)
 
-    print(f"[done] best Hausdorff variant: {method_names[best_hd_key]}")
+    print(
+        f"[done] samples={len(labels)}, tuned MHD={tuned_mhd['accuracy']:.4f}, "
+        f"RF={rf['accuracy']:.4f}, fusion={fusion['accuracy']:.4f}"
+    )
     print(f"[done] results: {RESULTS_DIR}")
 
 
