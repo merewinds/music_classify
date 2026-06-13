@@ -10,9 +10,10 @@ import argparse
 import csv
 import json
 import os
+import struct
 import sys
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -21,9 +22,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy import stats
 from scipy.spatial import cKDTree
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.inspection import permutation_importance
 from sklearn.manifold import MDS
 from sklearn.metrics import (
     accuracy_score,
@@ -50,6 +51,7 @@ RESULTS_DIR = ROOT / "results" / "final"
 FIGURE_DIR = RESULTS_DIR / "figures"
 TABLE_DIR = RESULTS_DIR / "tables"
 CACHE_DIR = RESULTS_DIR / "cache"
+PIPELINE_VERSION = "v2"
 GENRES = ["Classical", "Jazz", "Rock", "Blues", "Electronic"]
 COLORS = {
     "Classical": "#4472C4",
@@ -58,6 +60,24 @@ COLORS = {
     "Blues": "#5B9BD5",
     "Electronic": "#70AD47",
 }
+INNER_SEEDS = (2026, 2027, 2028)
+REPEAT_OUTER_SEEDS = (11, 23, 42, 67, 101)
+
+
+def dataset_cache_path(per_genre: int, n_points: int, seed: int) -> Path:
+    return CACHE_DIR / (
+        f"dataset_{PIPELINE_VERSION}_g{per_genre}_p{n_points}_s{seed}.npz"
+    )
+
+
+def distance_cache_path(per_genre: int, n_points: int, seed: int) -> Path:
+    return CACHE_DIR / (
+        f"distances_{PIPELINE_VERSION}_g{per_genre}_p{n_points}_s{seed}.npz"
+    )
+
+
+def sensitivity_cache_path(per_genre: int, seed: int) -> Path:
+    return CACHE_DIR / f"sensitivity_mhd_{PIPELINE_VERSION}_g{per_genre}_s{seed}.npz"
 
 
 def ensure_dirs() -> None:
@@ -81,11 +101,26 @@ def sample_dataset(
     seed: int,
     rebuild: bool = False,
 ) -> dict[str, np.ndarray]:
-    cache_path = CACHE_DIR / f"dataset_g{per_genre}_p{n_points}_s{seed}.npz"
+    cache_path = dataset_cache_path(per_genre, n_points, seed)
     if cache_path.exists() and not rebuild:
         print(f"[data] loading cache: {cache_path}")
         loaded = np.load(cache_path, allow_pickle=False)
-        return {key: loaded[key] for key in loaded.files}
+        result = {key: loaded[key] for key in loaded.files}
+        required = {
+            "curves",
+            "features",
+            "labels",
+            "groups",
+            "filenames",
+            "feature_names",
+        }
+        if not required.issubset(result):
+            raise ValueError(f"dataset cache is incomplete: {cache_path}")
+        if result["curves"].shape != (per_genre * len(GENRES), n_points, 3):
+            raise ValueError(f"dataset cache shape does not match configuration: {cache_path}")
+        if str(result.get("pipeline_version", "")) != PIPELINE_VERSION:
+            raise ValueError(f"dataset cache version mismatch: {cache_path}")
+        return result
 
     rng = np.random.default_rng(seed)
     all_titles: dict[str, set[str]] = {}
@@ -108,35 +143,58 @@ def sample_dataset(
     groups = []
     filenames = []
     metadata_rows = []
+    failure_rows = []
     feature_names: list[str] | None = None
 
     for genre in GENRES:
-        candidates = [
-            path
-            for path in files_by_genre[genre]
-            if canonical_title(path) not in cross_genre_titles
-        ]
-        order = rng.permutation(len(candidates))
+        candidates_by_group: dict[str, list[Path]] = defaultdict(list)
+        for path in files_by_genre[genre]:
+            title = canonical_title(path)
+            if title not in cross_genre_titles:
+                candidates_by_group[title].append(path)
+
+        candidate_groups = sorted(candidates_by_group)
+        order = rng.permutation(len(candidate_groups))
         failures = Counter()
         accepted = 0
         for index in order:
-            path = candidates[int(index)]
-            try:
-                curve, feat, names, meta = load_one_midi(path, n_points=n_points)
-            except Exception as exc:
-                failures[type(exc).__name__] += 1
+            group = candidate_groups[int(index)]
+            paths = candidates_by_group[group]
+            path_order = rng.permutation(len(paths))
+            parsed = None
+            selected_path = None
+            for path_index in path_order:
+                path = paths[int(path_index)]
+                try:
+                    parsed = load_one_midi(path, n_points=n_points)
+                    selected_path = path
+                    break
+                except (OSError, ValueError, struct.error) as exc:
+                    failures[type(exc).__name__] += 1
+                    failure_rows.append(
+                        {
+                            "genre": genre,
+                            "file": path.name,
+                            "group": group,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        }
+                    )
+            if parsed is None or selected_path is None:
                 continue
+            curve, feat, names, meta = parsed
             curves.append(curve)
             features.append(feat)
             labels.append(genre)
-            groups.append(canonical_title(path))
-            filenames.append(path.name)
+            groups.append(group)
+            filenames.append(selected_path.name)
             feature_names = names
             metadata_rows.append(
                 {
                     "genre": genre,
-                    "file": path.name,
-                    "group": canonical_title(path),
+                    "file": selected_path.name,
+                    "group": group,
+                    "available_versions": len(paths),
                     **meta,
                 }
             )
@@ -156,9 +214,14 @@ def sample_dataset(
         "groups": np.asarray(groups, dtype=str),
         "filenames": np.asarray(filenames, dtype=str),
         "feature_names": np.asarray(feature_names, dtype=str),
+        "cross_genre_title_count": np.asarray(len(cross_genre_titles)),
+        "pipeline_version": np.asarray(PIPELINE_VERSION),
     }
+    if len(np.unique(result["groups"])) != len(result["groups"]):
+        raise RuntimeError("group-level sampling produced duplicate title groups")
     np.savez_compressed(cache_path, **result)
     save_csv(TABLE_DIR / "sample_metadata.csv", metadata_rows)
+    save_csv(TABLE_DIR / "sample_failures.csv", failure_rows)
     print(f"[data] cache written: {cache_path}")
     return result
 
@@ -279,7 +342,7 @@ def compute_distances(
     workers: int,
     rebuild: bool = False,
 ) -> dict[str, np.ndarray]:
-    cache_path = CACHE_DIR / f"distances_g{per_genre}_p{n_points}_s{seed}.npz"
+    cache_path = distance_cache_path(per_genre, n_points, seed)
     if cache_path.exists() and not rebuild:
         print(f"[distance] loading cache: {cache_path}")
         loaded = np.load(cache_path, allow_pickle=False)
@@ -335,19 +398,23 @@ def choose_k(
     labels: np.ndarray,
     groups: np.ndarray,
     candidates: tuple[int, ...] = (1, 3, 5, 7, 9),
+    inner_seeds: tuple[int, ...] = INNER_SEEDS,
 ) -> int:
     inner_labels = labels[train_idx]
     inner_groups = groups[train_idx]
-    splitter = StratifiedGroupKFold(n_splits=3, shuffle=True, random_state=2026)
     scores = {k: [] for k in candidates}
-    for inner_train, inner_test in splitter.split(
-        np.zeros(len(train_idx)), inner_labels, inner_groups
-    ):
-        global_train = train_idx[inner_train]
-        global_test = train_idx[inner_test]
-        for k in candidates:
-            pred = predict_knn(matrix, global_train, global_test, labels, k)
-            scores[k].append(balanced_accuracy_score(labels[global_test], pred))
+    for inner_seed in inner_seeds:
+        splitter = StratifiedGroupKFold(
+            n_splits=3, shuffle=True, random_state=inner_seed
+        )
+        for inner_train, inner_test in splitter.split(
+            np.zeros(len(train_idx)), inner_labels, inner_groups
+        ):
+            global_train = train_idx[inner_train]
+            global_test = train_idx[inner_test]
+            for k in candidates:
+                pred = predict_knn(matrix, global_train, global_test, labels, k)
+                scores[k].append(balanced_accuracy_score(labels[global_test], pred))
     return max(candidates, key=lambda k: (np.mean(scores[k]), -k))
 
 
@@ -356,15 +423,25 @@ def evaluate_distance_metric(
     matrix: np.ndarray,
     labels: np.ndarray,
     groups: np.ndarray,
+    outer_seed: int = 42,
+    inner_seeds: tuple[int, ...] = INNER_SEEDS,
 ) -> tuple[dict, np.ndarray, np.ndarray]:
-    splitter = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+    splitter = StratifiedGroupKFold(
+        n_splits=5, shuffle=True, random_state=outer_seed
+    )
     predictions = np.empty(len(labels), dtype=labels.dtype)
     fold_rows = []
     selected_k = []
     for fold, (train_idx, test_idx) in enumerate(
         splitter.split(np.zeros(len(labels)), labels, groups), start=1
     ):
-        k = choose_k(matrix, train_idx, labels, groups)
+        k = choose_k(
+            matrix,
+            train_idx,
+            labels,
+            groups,
+            inner_seeds=inner_seeds,
+        )
         selected_k.append(k)
         pred = predict_knn(matrix, train_idx, test_idx, labels, k)
         predictions[test_idx] = pred
@@ -398,8 +475,12 @@ def evaluate_random_forest(
     features: np.ndarray,
     labels: np.ndarray,
     groups: np.ndarray,
+    outer_seed: int = 42,
+    compute_importance: bool = True,
 ) -> tuple[dict, np.ndarray, list[dict], np.ndarray]:
-    splitter = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+    splitter = StratifiedGroupKFold(
+        n_splits=5, shuffle=True, random_state=outer_seed
+    )
     predictions = np.empty(len(labels), dtype=labels.dtype)
     fold_rows = []
     importances = []
@@ -411,13 +492,23 @@ def evaluate_random_forest(
             min_samples_leaf=2,
             max_features="sqrt",
             class_weight="balanced",
-            random_state=100 + fold,
+            random_state=10_000 + outer_seed * 10 + fold,
             n_jobs=-1,
         )
         model.fit(features[train_idx], labels[train_idx])
         pred = model.predict(features[test_idx])
         predictions[test_idx] = pred
-        importances.append(model.feature_importances_)
+        if compute_importance:
+            importance = permutation_importance(
+                model,
+                features[test_idx],
+                labels[test_idx],
+                scoring="balanced_accuracy",
+                n_repeats=10,
+                random_state=20_000 + outer_seed * 10 + fold,
+                n_jobs=-1,
+            )
+            importances.append(importance.importances_mean)
         fold_rows.append(
             {
                 "method": "RF descriptors",
@@ -440,77 +531,107 @@ def evaluate_random_forest(
         "k_mode": "",
         "k_selected": "",
     }
-    return summary, predictions, fold_rows, np.mean(importances, axis=0)
+    mean_importance = (
+        np.mean(importances, axis=0)
+        if importances
+        else np.full(features.shape[1], np.nan)
+    )
+    return summary, predictions, fold_rows, mean_importance
 
 
-def evaluate_weighted_mhd(
-    velocity_matrices: dict[float, np.ndarray],
+def evaluate_tuned_mhd(
+    parameter_matrices: dict[tuple[int, float], np.ndarray],
     labels: np.ndarray,
     groups: np.ndarray,
+    outer_seed: int = 42,
+    inner_seeds: tuple[int, ...] = INNER_SEEDS,
 ) -> tuple[dict, np.ndarray, list[dict]]:
+    """Nested selection of grid resolution, velocity weight, and K."""
     candidates = (1, 3, 5, 7, 9)
-    splitter = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+    splitter = StratifiedGroupKFold(
+        n_splits=5, shuffle=True, random_state=outer_seed
+    )
     predictions = np.empty(len(labels), dtype=labels.dtype)
     fold_rows = []
-    selections = []
+    selections: list[tuple[int, float, int]] = []
 
     for fold, (train_idx, test_idx) in enumerate(
         splitter.split(np.zeros(len(labels)), labels, groups), start=1
     ):
         inner_labels = labels[train_idx]
         inner_groups = groups[train_idx]
-        inner = StratifiedGroupKFold(n_splits=3, shuffle=True, random_state=2026)
         scores = {
-            (weight, k): []
-            for weight in velocity_matrices
+            (n_points, weight, k): []
+            for n_points, weight in parameter_matrices
             for k in candidates
         }
-        for inner_train, inner_test in inner.split(
-            np.zeros(len(train_idx)), inner_labels, inner_groups
-        ):
-            global_train = train_idx[inner_train]
-            global_test = train_idx[inner_test]
-            for weight, matrix in velocity_matrices.items():
-                for k in candidates:
-                    pred = predict_knn(
-                        matrix, global_train, global_test, labels, k
-                    )
-                    scores[(weight, k)].append(
-                        balanced_accuracy_score(labels[global_test], pred)
-                    )
-        weight, k = max(
+        for inner_seed in inner_seeds:
+            inner = StratifiedGroupKFold(
+                n_splits=3, shuffle=True, random_state=inner_seed
+            )
+            for inner_train, inner_test in inner.split(
+                np.zeros(len(train_idx)), inner_labels, inner_groups
+            ):
+                global_train = train_idx[inner_train]
+                global_test = train_idx[inner_test]
+                for (n_points, weight), matrix in parameter_matrices.items():
+                    for k in candidates:
+                        pred = predict_knn(
+                            matrix,
+                            global_train,
+                            global_test,
+                            labels,
+                            k,
+                        )
+                        scores[(n_points, weight, k)].append(
+                            balanced_accuracy_score(labels[global_test], pred)
+                        )
+        n_points, weight, k = max(
             scores,
-            key=lambda item: (np.mean(scores[item]), -item[0], -item[1]),
+            key=lambda item: (
+                np.mean(scores[item]),
+                -item[0],
+                -item[1],
+                -item[2],
+            ),
         )
-        selections.append((weight, k))
+        selections.append((n_points, weight, k))
         pred = predict_knn(
-            velocity_matrices[weight], train_idx, test_idx, labels, k
+            parameter_matrices[(n_points, weight)],
+            train_idx,
+            test_idx,
+            labels,
+            k,
         )
         predictions[test_idx] = pred
         fold_rows.append(
             {
-                "method": "Weighted MHD (nested)",
+                "method": "Tuned MHD (nested)",
                 "fold": fold,
                 "k": k,
                 "n_test": len(test_idx),
                 "accuracy": accuracy_score(labels[test_idx], pred),
                 "balanced_accuracy": balanced_accuracy_score(labels[test_idx], pred),
                 "macro_f1": f1_score(labels[test_idx], pred, average="macro"),
+                "resample_points": n_points,
                 "velocity_weight": weight,
             }
         )
 
     fold_acc = np.asarray([row["accuracy"] for row in fold_rows])
     summary = {
-        "method": "Weighted MHD (nested)",
+        "method": "Tuned MHD (nested)",
         "accuracy": accuracy_score(labels, predictions),
         "balanced_accuracy": balanced_accuracy_score(labels, predictions),
         "macro_f1": f1_score(labels, predictions, average="macro"),
         "fold_mean": fold_acc.mean(),
         "fold_std": fold_acc.std(ddof=1),
-        "k_mode": Counter(k for _, k in selections).most_common(1)[0][0],
-        "k_selected": "/".join(str(k) for _, k in selections),
-        "weight_selected": "/".join(f"{weight:.2f}" for weight, _ in selections),
+        "k_mode": Counter(k for _, _, k in selections).most_common(1)[0][0],
+        "k_selected": "/".join(str(k) for _, _, k in selections),
+        "points_selected": "/".join(str(points) for points, _, _ in selections),
+        "weight_selected": "/".join(
+            f"{weight:.2f}" for _, weight, _ in selections
+        ),
     }
     return summary, predictions, fold_rows
 
@@ -518,8 +639,9 @@ def evaluate_weighted_mhd(
 def distance_statistics(
     matrix: np.ndarray,
     labels: np.ndarray,
+    groups: np.ndarray,
     seed: int,
-    permutations: int = 499,
+    permutations: int = 1999,
 ) -> dict:
     upper = np.triu_indices(len(labels), k=1)
     distances = matrix[upper]
@@ -529,10 +651,20 @@ def distance_statistics(
     auc = roc_auc_score(same.astype(int), -distances)
     observed_gap = float(between.mean() - within.mean())
 
+    unique_groups, group_inverse = np.unique(groups, return_inverse=True)
+    group_labels = np.empty(len(unique_groups), dtype=labels.dtype)
+    for group_index in range(len(unique_groups)):
+        labels_in_group = np.unique(labels[group_inverse == group_index])
+        if len(labels_in_group) != 1:
+            raise ValueError(
+                f"group {unique_groups[group_index]!r} spans multiple genre labels"
+            )
+        group_labels[group_index] = labels_in_group[0]
+
     rng = np.random.default_rng(seed)
     perm_gaps = np.empty(permutations)
     for i in range(permutations):
-        shuffled = rng.permutation(labels)
+        shuffled = rng.permutation(group_labels)[group_inverse]
         perm_same = shuffled[upper[0]] == shuffled[upper[1]]
         perm_gaps[i] = (
             distances[~perm_same].mean() - distances[perm_same].mean()
@@ -546,32 +678,51 @@ def distance_statistics(
         "mean_gap": observed_gap,
         "pair_auc": float(auc),
         "permutation_p": float(p_value),
+        "permutation_count": int(permutations),
+        "permutation_groups": int(len(unique_groups)),
         "within": within,
         "between": between,
     }
 
 
-def resample_curve_batch(curves: np.ndarray, n_points: int) -> np.ndarray:
-    old_grid = curves[0, :, 0]
-    new_grid = np.linspace(0.0, 1.0, n_points)
-    result = np.empty((len(curves), n_points, 3), dtype=np.float64)
-    result[:, :, 0] = new_grid
-    for i, curve in enumerate(curves):
-        result[i, :, 1] = np.interp(new_grid, old_grid, curve[:, 1])
-        result[i, :, 2] = np.interp(new_grid, old_grid, curve[:, 2])
-    return result
+def reload_curves_at_resolution(
+    labels: np.ndarray,
+    filenames: np.ndarray,
+    n_points: int,
+    workers: int,
+) -> np.ndarray:
+    """Reparse the selected MIDI files at a new grid resolution.
+
+    This avoids a second interpolation from the default 96-point curves, which
+    would otherwise confound the resampling sensitivity experiment with an
+    additional smoothing step.
+    """
+
+    def load_index(index: int) -> tuple[int, np.ndarray]:
+        path = DATA_DIR / str(labels[index]) / str(filenames[index])
+        curve, _, _, _ = load_one_midi(path, n_points=n_points)
+        return index, curve
+
+    curves = np.empty((len(labels), n_points, 3), dtype=np.float64)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(load_index, index) for index in range(len(labels))]
+        for future in as_completed(futures):
+            index, curve = future.result()
+            curves[index] = curve
+    return curves
 
 
 def run_sensitivity(
     base_curves: np.ndarray,
     labels: np.ndarray,
     groups: np.ndarray,
+    filenames: np.ndarray,
     existing_mhd: np.ndarray,
     per_genre: int,
     seed: int,
     workers: int,
 ) -> tuple[list[dict], dict[str, np.ndarray]]:
-    cache_path = CACHE_DIR / f"sensitivity_mhd_g{per_genre}_s{seed}.npz"
+    cache_path = sensitivity_cache_path(per_genre, seed)
     cached: dict[str, np.ndarray] = {}
     if cache_path.exists():
         loaded = np.load(cache_path, allow_pickle=False)
@@ -579,37 +730,57 @@ def run_sensitivity(
         for name, matrix in cached.items():
             validate_distance_matrix(name, matrix)
 
-    matrices: dict[str, np.ndarray] = {"points_96": existing_mhd, "velocity_0.25": existing_mhd}
+    matrices: dict[str, np.ndarray] = {}
     point_counts = (48, 72, 96)
     velocity_weights = (0.0, 0.10, 0.25, 0.50)
+    curve_batches: dict[int, np.ndarray] = {96: base_curves}
 
     for n_points in point_counts:
-        key = f"points_{n_points}"
-        if key in matrices:
-            continue
-        if key in cached:
-            matrices[key] = cached[key]
-            continue
-        sampled = resample_curve_batch(base_curves, n_points)
-        represented = np.asarray([relative_curve(curve, 0.25) for curve in sampled])
-        matrices[key] = distance_family(
-            represented, ("mhd",), workers, key
-        )["mhd"]
-        validate_distance_matrix(key, matrices[key])
+        for weight in velocity_weights:
+            key = f"points_{n_points}_velocity_{weight:.2f}"
+            alias = (
+                f"points_{n_points}"
+                if weight == 0.25
+                else f"velocity_{weight:.2f}"
+                if n_points == 96
+                else ""
+            )
+            if n_points == 96 and weight == 0.25:
+                matrices[key] = existing_mhd
+            elif key in cached:
+                matrices[key] = cached[key]
+            elif alias and alias in cached:
+                matrices[key] = cached[alias]
+            else:
+                if n_points not in curve_batches:
+                    curve_batches[n_points] = reload_curves_at_resolution(
+                        labels,
+                        filenames,
+                        n_points,
+                        workers,
+                    )
+                represented = np.asarray(
+                    [
+                        relative_curve(curve, weight)
+                        for curve in curve_batches[n_points]
+                    ]
+                )
+                matrices[key] = distance_family(
+                    represented,
+                    ("mhd",),
+                    workers,
+                    key,
+                )["mhd"]
+                validate_distance_matrix(key, matrices[key])
 
+    for n_points in point_counts:
+        matrices[f"points_{n_points}"] = matrices[
+            f"points_{n_points}_velocity_0.25"
+        ]
     for weight in velocity_weights:
-        key = f"velocity_{weight:.2f}"
-        if weight == 0.25:
-            matrices[key] = existing_mhd
-            continue
-        if key in cached:
-            matrices[key] = cached[key]
-            continue
-        represented = np.asarray([relative_curve(curve, weight) for curve in base_curves])
-        matrices[key] = distance_family(
-            represented, ("mhd",), workers, key
-        )["mhd"]
-        validate_distance_matrix(key, matrices[key])
+        matrices[f"velocity_{weight:.2f}"] = matrices[
+            f"points_96_velocity_{weight:.2f}"
+        ]
 
     np.savez_compressed(cache_path, **matrices)
     rows = []
@@ -641,6 +812,69 @@ def run_sensitivity(
             }
         )
     return rows, matrices
+
+
+def run_repeated_validation(
+    mhd_matrix: np.ndarray,
+    parameter_matrices: dict[tuple[int, float], np.ndarray],
+    features: np.ndarray,
+    labels: np.ndarray,
+    groups: np.ndarray,
+    outer_seeds: tuple[int, ...] = REPEAT_OUTER_SEEDS,
+) -> tuple[list[dict], list[dict]]:
+    rows: list[dict] = []
+    for outer_seed in outer_seeds:
+        mhd_summary, _, _ = evaluate_distance_metric(
+            "MHD relative TPV",
+            mhd_matrix,
+            labels,
+            groups,
+            outer_seed=outer_seed,
+        )
+        tuned_summary, _, _ = evaluate_tuned_mhd(
+            parameter_matrices,
+            labels,
+            groups,
+            outer_seed=outer_seed,
+        )
+        rf_summary, _, _, _ = evaluate_random_forest(
+            features,
+            labels,
+            groups,
+            outer_seed=outer_seed,
+            compute_importance=False,
+        )
+        for summary in (mhd_summary, tuned_summary, rf_summary):
+            rows.append(
+                {
+                    "method": summary["method"],
+                    "outer_seed": outer_seed,
+                    "accuracy": summary["accuracy"],
+                    "balanced_accuracy": summary["balanced_accuracy"],
+                    "macro_f1": summary["macro_f1"],
+                    "fold_mean": summary["fold_mean"],
+                    "fold_std": summary["fold_std"],
+                }
+            )
+
+    aggregate_rows = []
+    for method in ("MHD relative TPV", "Tuned MHD (nested)", "RF descriptors"):
+        selected = [row for row in rows if row["method"] == method]
+        accuracy = np.asarray([row["accuracy"] for row in selected])
+        macro_f1 = np.asarray([row["macro_f1"] for row in selected])
+        aggregate_rows.append(
+            {
+                "method": method,
+                "repeats": len(selected),
+                "accuracy_mean": accuracy.mean(),
+                "accuracy_std": accuracy.std(ddof=1),
+                "accuracy_min": accuracy.min(),
+                "accuracy_max": accuracy.max(),
+                "macro_f1_mean": macro_f1.mean(),
+                "macro_f1_std": macro_f1.std(ddof=1),
+            }
+        )
+    return rows, aggregate_rows
 
 
 def genre_mean_matrix(matrix: np.ndarray, labels: np.ndarray) -> np.ndarray:
@@ -796,7 +1030,16 @@ def plot_model_comparison(summaries: list[dict]) -> None:
     names = [row["method"] for row in summaries]
     means = [row["fold_mean"] for row in summaries]
     stds = [row["fold_std"] for row in summaries]
-    colors = ["#A5A5A5", "#5B9BD5", "#4472C4", "#ED7D31", "#70AD47", "#7030A0", "#C55A11"]
+    colors = [
+        "#A5A5A5",
+        "#5B9BD5",
+        "#4472C4",
+        "#ED7D31",
+        "#70AD47",
+        "#7030A0",
+        "#C55A11",
+        "#1F4E78",
+    ]
     bars = ax.bar(range(len(names)), means, yerr=stds, capsize=4, color=colors[: len(names)])
     ax.axhline(0.2, color="black", linestyle="--", lw=1, label="random baseline")
     ax.set_xticks(range(len(names)), names, rotation=25, ha="right")
@@ -848,8 +1091,8 @@ def plot_feature_importance(importances: np.ndarray, names: np.ndarray) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.barh(range(len(top)), importances[top], color="#70AD47")
     ax.set_yticks(range(len(top)), names[top])
-    ax.set_xlabel("mean feature importance")
-    ax.set_title("Random-forest descriptor importance")
+    ax.set_xlabel("held-out balanced-accuracy decrease")
+    ax.set_title("Random-forest permutation importance")
     ax.grid(axis="x", alpha=0.2)
     fig.tight_layout()
     fig.savefig(FIGURE_DIR / "feature_importance.png", dpi=220, bbox_inches="tight")
@@ -895,6 +1138,7 @@ def main() -> None:
     curves = dataset["curves"]
     labels = dataset["labels"]
     groups = dataset["groups"]
+    filenames = dataset["filenames"]
     features = dataset["features"]
 
     matrices = compute_distances(
@@ -930,33 +1174,43 @@ def main() -> None:
             f"+/- {summary['fold_std']:.4f}, k={summary['k_selected']}"
         )
 
-    stats_row = distance_statistics(matrices["mhd_tpv"], labels, args.seed)
+    stats_row = distance_statistics(
+        matrices["mhd_tpv"],
+        labels,
+        groups,
+        args.seed,
+    )
     genre_matrix = genre_mean_matrix(matrices["mhd_tpv"], labels)
     synthetic_rows = synthetic_robustness()
     sensitivity_rows, sensitivity_matrices = run_sensitivity(
         curves,
         labels,
         groups,
+        filenames,
         matrices["mhd_tpv"],
         args.per_genre,
         args.seed,
         args.workers,
     )
-    velocity_matrices = {
-        weight: sensitivity_matrices[f"velocity_{weight:.2f}"]
+    parameter_matrices = {
+        (n_points, weight): sensitivity_matrices[
+            f"points_{n_points}_velocity_{weight:.2f}"
+        ]
+        for n_points in (48, 72, 96)
         for weight in (0.0, 0.10, 0.25, 0.50)
     }
-    weighted_summary, weighted_predictions, weighted_folds = evaluate_weighted_mhd(
-        velocity_matrices, labels, groups
+    tuned_summary, tuned_predictions, tuned_folds = evaluate_tuned_mhd(
+        parameter_matrices, labels, groups
     )
-    summaries.append(weighted_summary)
-    fold_rows.extend(weighted_folds)
-    predictions_by_method["weighted_mhd"] = weighted_predictions
-    method_names["weighted_mhd"] = "Weighted MHD (nested)"
+    summaries.append(tuned_summary)
+    fold_rows.extend(tuned_folds)
+    predictions_by_method["tuned_mhd"] = tuned_predictions
+    method_names["tuned_mhd"] = "Tuned MHD (nested)"
     print(
-        f"[eval] Weighted MHD (nested): {weighted_summary['fold_mean']:.4f} "
-        f"+/- {weighted_summary['fold_std']:.4f}, "
-        f"weights={weighted_summary['weight_selected']}"
+        f"[eval] Tuned MHD (nested): {tuned_summary['fold_mean']:.4f} "
+        f"+/- {tuned_summary['fold_std']:.4f}, "
+        f"points={tuned_summary['points_selected']}, "
+        f"weights={tuned_summary['weight_selected']}"
     )
 
     rf_summary, rf_predictions, rf_folds, importances = evaluate_random_forest(
@@ -968,6 +1222,14 @@ def main() -> None:
     print(
         f"[eval] RF descriptors: {rf_summary['fold_mean']:.4f} "
         f"+/- {rf_summary['fold_std']:.4f}"
+    )
+
+    repeated_rows, repeated_summary = run_repeated_validation(
+        matrices["mhd_tpv"],
+        parameter_matrices,
+        features,
+        labels,
+        groups,
     )
 
     save_csv(TABLE_DIR / "model_summary.csv", summaries)
@@ -984,6 +1246,8 @@ def main() -> None:
     )
     save_csv(TABLE_DIR / "synthetic_robustness.csv", synthetic_rows)
     save_csv(TABLE_DIR / "sensitivity.csv", sensitivity_rows)
+    save_csv(TABLE_DIR / "repeated_validation.csv", repeated_rows)
+    save_csv(TABLE_DIR / "repeated_validation_summary.csv", repeated_summary)
     np.savetxt(
         TABLE_DIR / "genre_mean_distance.csv",
         genre_matrix,
@@ -993,17 +1257,19 @@ def main() -> None:
     )
 
     best_hd_key = max(
-        ("hd_local", "hd_tp", "hd_tpv", "q95_tpv", "mhd_tpv", "weighted_mhd"),
+        ("hd_local", "hd_tp", "hd_tpv", "q95_tpv", "mhd_tpv", "tuned_mhd"),
         key=lambda key: next(
             row["fold_mean"] for row in summaries if row["method"] == method_names[key]
         ),
     )
     run_summary = {
         "config": vars(args),
+        "pipeline_version": PIPELINE_VERSION,
         "genres": GENRES,
         "n_samples": int(len(labels)),
         "class_counts": {genre: int(np.sum(labels == genre)) for genre in GENRES},
         "unique_groups": int(len(np.unique(groups))),
+        "excluded_cross_genre_groups": int(dataset["cross_genre_title_count"]),
         "best_hausdorff_method": method_names[best_hd_key],
         "distance_statistics_mhd": {
             key: value
@@ -1012,6 +1278,7 @@ def main() -> None:
         },
         "models": summaries,
         "sensitivity": sensitivity_rows,
+        "repeated_validation": repeated_summary,
     }
     (RESULTS_DIR / "summary.json").write_text(
         json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8"

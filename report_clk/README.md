@@ -17,4 +17,16 @@ latexmk -xelatex -interaction=nonstopmode main.tex
 - `../results/final/figures_paper/`
 - `../results/final/tables_paper/`
 
-论文引用的图件已同步到本目录的 `figures/`。
+论文引用的图件已同步到本目录的 `figures/`，因此直接编译 `main.tex` 不需要
+`results/` 目录。只有重跑完整实验或重新生成论文图表与展示型 CSV 时，才需要
+先生成 `results/final/` 下的对应文件。
+
+当前实验缓存版本为 `v2`。复现前可先运行基础回归测试：
+
+```powershell
+D:\app\Anaconda\python.exe -m unittest code.test_pipeline -v
+```
+
+最终流程采用每曲名组一个版本、组级标签置换、重复内层三折调参，以及五组外层
+随机分折稳定性验证。`../results/final/tables_paper/` 另含两种模型的混淆矩阵和
+随机森林折外置换重要性，便于逐项核查论文结论。

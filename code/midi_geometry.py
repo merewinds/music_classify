@@ -19,7 +19,7 @@ from scipy.spatial import cKDTree
 
 def _read_vlq(data: bytes, pos: int) -> tuple[int, int]:
     value = 0
-    for _ in range(4):
+    for index in range(4):
         if pos >= len(data):
             raise ValueError("truncated variable-length quantity")
         byte = data[pos]
@@ -27,7 +27,9 @@ def _read_vlq(data: bytes, pos: int) -> tuple[int, int]:
         value = (value << 7) | (byte & 0x7F)
         if byte < 0x80:
             return value, pos
-    return value, pos
+        if index == 3:
+            raise ValueError("variable-length quantity exceeds four bytes")
+    raise AssertionError("unreachable")
 
 
 def _parse_track(track: bytes) -> list[tuple[int, int, int]]:
@@ -56,15 +58,19 @@ def _parse_track(track: bytes) -> list[tuple[int, int, int]]:
 
         if status == 0xFF:
             if pos >= len(track):
-                break
+                raise ValueError("truncated meta event")
             pos += 1  # meta type
             length, pos = _read_vlq(track, pos)
+            if pos + length > len(track):
+                raise ValueError("truncated meta-event payload")
             pos += length
             running_status = None
             continue
 
         if status in (0xF0, 0xF7):
             length, pos = _read_vlq(track, pos)
+            if pos + length > len(track):
+                raise ValueError("truncated system-exclusive payload")
             pos += length
             running_status = None
             continue
@@ -72,7 +78,7 @@ def _parse_track(track: bytes) -> list[tuple[int, int, int]]:
         event_type = status & 0xF0
         data_len = 1 if event_type in (0xC0, 0xD0) else 2
         if pos + data_len > len(track):
-            break
+            raise ValueError("truncated MIDI channel event")
         data1 = track[pos]
         data2 = track[pos + 1] if data_len == 2 else 0
         pos += data_len
@@ -100,9 +106,15 @@ def parse_midi_note_ons(path: str | Path) -> tuple[np.ndarray, int]:
     header_len = struct.unpack(">I", data[4:8])[0]
     if header_len < 6:
         raise ValueError("invalid MIDI header")
-    _, n_tracks, division = struct.unpack(">HHH", data[8:14])
+    midi_format, n_tracks, division = struct.unpack(">HHH", data[8:14])
+    if midi_format not in (0, 1):
+        raise ValueError(f"MIDI format {midi_format} is not supported")
+    if midi_format == 0 and n_tracks != 1:
+        raise ValueError("MIDI format 0 must contain exactly one track")
     if division & 0x8000:
         raise ValueError("SMPTE timing is not supported")
+    if division == 0:
+        raise ValueError("ticks per quarter note must be positive")
 
     pos = 8 + header_len
     notes: list[tuple[int, int, int]] = []
@@ -110,6 +122,8 @@ def parse_midi_note_ons(path: str | Path) -> tuple[np.ndarray, int]:
     while pos + 8 <= len(data) and tracks_seen < n_tracks:
         chunk_type = data[pos : pos + 4]
         chunk_len = struct.unpack(">I", data[pos + 4 : pos + 8])[0]
+        if pos + 8 + chunk_len > len(data):
+            raise ValueError("truncated MIDI track chunk")
         chunk = data[pos + 8 : pos + 8 + chunk_len]
         pos += 8 + chunk_len
         if chunk_type != b"MTrk":
@@ -133,7 +147,9 @@ def skyline_melody(note_ons: np.ndarray, division: int) -> np.ndarray:
         while j < len(note_ons) and note_ons[j, 0] == tick:
             j += 1
         chord = note_ons[i:j]
-        best = chord[np.argmax(chord[:, 1])]
+        top_pitch = chord[:, 1].max()
+        top_notes = chord[chord[:, 1] == top_pitch]
+        best = top_notes[np.argmax(top_notes[:, 2])]
         melody.append((tick / division, best[1], best[2]))
         i = j
     return np.asarray(melody, dtype=np.float64)
@@ -189,9 +205,16 @@ def nearest_distance_summaries(
     return hd, q95, mhd
 
 
+_VERSION_TERMS = (
+    r"album|live|remaster(?:ed)?|version|mix|remix|take|edit|recording|"
+    r"instrumental|karaoke|demo|mono|stereo|lp"
+)
 _VERSION_WORDS = re.compile(
-    r"\b(album|live|remaster(?:ed)?|version|mix|remix|take|edit|recording|"
-    r"instrumental|karaoke|demo|mono|stereo)\b.*$",
+    rf"\b(?:{_VERSION_TERMS})\b.*$",
+    flags=re.IGNORECASE,
+)
+_BRACKETED_VERSION = re.compile(
+    rf"[\(\[][^)\]]*\b(?:{_VERSION_TERMS})\b[^)\]]*[\)\]]",
     flags=re.IGNORECASE,
 )
 
@@ -199,10 +222,12 @@ _VERSION_WORDS = re.compile(
 def canonical_title(path: str | Path) -> str:
     """Normalize obvious alternate-version suffixes for grouped validation."""
     text = unicodedata.normalize("NFKD", Path(path).stem).casefold()
-    text = re.sub(r"\([^)]*\)", " ", text)
-    text = re.sub(r"\[[^]]*\]", " ", text)
+    text = _BRACKETED_VERSION.sub(" ", text)
     text = _VERSION_WORDS.sub(" ", text)
-    text = re.sub(r"(?:[_\-\s]+(?:take)?\s*\d+)$", " ", text)
+    # Dataset duplicate exports commonly end in "_1" or "-2".  A plain
+    # trailing number is retained because it may be a work number
+    # (for example, "Sinfonia 5").
+    text = re.sub(r"(?:[_-]\s*(?:take\s*)?\d+)$", " ", text)
     text = re.sub(r"[^a-z0-9]+", "", text)
     return text or f"untitled-{Path(path).name.casefold()}"
 

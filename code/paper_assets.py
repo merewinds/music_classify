@@ -27,10 +27,13 @@ from sklearn.metrics import confusion_matrix
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from final_experiment import (  # noqa: E402
     GENRES,
+    dataset_cache_path,
     distance_statistics,
+    distance_cache_path,
     evaluate_random_forest,
-    evaluate_weighted_mhd,
+    evaluate_tuned_mhd,
     relative_curve,
+    sensitivity_cache_path,
 )
 
 
@@ -73,7 +76,7 @@ METHOD_CN = {
     "Q95-HD relative TPV": "Q95-HD（三维固定权重）",
     "MHD relative TPV": "MHD（三维固定权重）",
     "DTW relative pitch": "DTW（相对音高）",
-    "Weighted MHD (nested)": "加权 MHD（嵌套选择）",
+    "Tuned MHD (nested)": "多参数 MHD（嵌套选择）",
     "RF descriptors": "随机森林（统计描述符）",
 }
 FEATURE_CN = {
@@ -106,16 +109,16 @@ FEATURE_CN = {
     "pitch_class_entropy": "音级熵",
     "pitch_class_peak": "主音级集中度",
     "pc_0": "C 音级占比",
-    "pc_1": "C♯/D♭ 音级占比",
+    "pc_1": "C#/Db 音级占比",
     "pc_2": "D 音级占比",
-    "pc_3": "D♯/E♭ 音级占比",
+    "pc_3": "D#/Eb 音级占比",
     "pc_4": "E 音级占比",
     "pc_5": "F 音级占比",
-    "pc_6": "F♯/G♭ 音级占比",
+    "pc_6": "F#/Gb 音级占比",
     "pc_7": "G 音级占比",
-    "pc_8": "G♯/A♭ 音级占比",
+    "pc_8": "G#/Ab 音级占比",
     "pc_9": "A 音级占比",
-    "pc_10": "A♯/B♭ 音级占比",
+    "pc_10": "A#/Bb 音级占比",
     "pc_11": "B 音级占比",
 }
 
@@ -179,9 +182,9 @@ def save_csv(filename: str, rows: list[dict]) -> None:
 
 
 def load_assets() -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]]:
-    dataset_file = CACHE / "dataset_g80_p96_s2026.npz"
-    distance_file = CACHE / "distances_g80_p96_s2026.npz"
-    sensitivity_file = CACHE / "sensitivity_mhd_g80_s2026.npz"
+    dataset_file = dataset_cache_path(80, 96, 2026)
+    distance_file = distance_cache_path(80, 96, 2026)
+    sensitivity_file = sensitivity_cache_path(80, 2026)
     dataset_npz = np.load(dataset_file, allow_pickle=False)
     distance_npz = np.load(distance_file, allow_pickle=False)
     sensitivity_npz = np.load(sensitivity_file, allow_pickle=False)
@@ -209,6 +212,9 @@ def export_tables(
                 "平衡准确率": f"{100 * row['balanced_accuracy']:.2f}%",
                 "Macro-F1": f"{row['macro_f1']:.4f}",
                 "各折K值": "" if pd.isna(row["k_selected"]) else str(row["k_selected"]),
+                "各折重采样点数": ""
+                if pd.isna(row.get("points_selected"))
+                else str(row["points_selected"]),
                 "各折音量权重": ""
                 if pd.isna(row.get("weight_selected"))
                 else str(row["weight_selected"]),
@@ -231,6 +237,9 @@ def export_tables(
                 "音量权重": ""
                 if pd.isna(row.get("velocity_weight"))
                 else f"{row['velocity_weight']:.2f}",
+                "重采样点数": ""
+                if pd.isna(row.get("resample_points"))
+                else int(row["resample_points"]),
             }
         )
     save_csv("外层五折结果.csv", fold_rows)
@@ -309,6 +318,64 @@ def export_tables(
     ]
     save_csv("离群点稳健性.csv", robustness_rows)
 
+    repeated = pd.read_csv(RAW_TABLES / "repeated_validation_summary.csv")
+    repeated_rows = []
+    for _, row in repeated.iterrows():
+        repeated_rows.append(
+            {
+                "方法": METHOD_CN[row["method"]],
+                "重复次数": int(row["repeats"]),
+                "准确率均值": f"{100 * row['accuracy_mean']:.2f}%",
+                "重复间标准差": f"{100 * row['accuracy_std']:.2f}%",
+                "最低准确率": f"{100 * row['accuracy_min']:.2f}%",
+                "最高准确率": f"{100 * row['accuracy_max']:.2f}%",
+                "Macro-F1均值": f"{row['macro_f1_mean']:.4f}",
+            }
+        )
+    save_csv("重复分组验证.csv", repeated_rows)
+
+
+def export_model_diagnostics(
+    labels: np.ndarray,
+    tuned_predictions: np.ndarray,
+    rf_predictions: np.ndarray,
+    importances: np.ndarray,
+    feature_names: np.ndarray,
+) -> None:
+    for filename, predictions in (
+        ("混淆矩阵_多参数MHD.csv", tuned_predictions),
+        ("混淆矩阵_随机森林.csv", rf_predictions),
+    ):
+        matrix = confusion_matrix(
+            labels,
+            predictions,
+            labels=GENRES,
+            normalize="true",
+        )
+        rows = []
+        for row_index, genre in enumerate(GENRES):
+            row = {"真实曲风": GENRE_CN[genre]}
+            row.update(
+                {
+                    f"预测为{GENRE_CN[predicted]}": f"{matrix[row_index, column_index]:.4f}"
+                    for column_index, predicted in enumerate(GENRES)
+                }
+            )
+            rows.append(row)
+        save_csv(filename, rows)
+
+    order = np.argsort(importances)[::-1]
+    importance_rows = [
+        {
+            "排名": rank,
+            "特征": FEATURE_CN.get(str(feature_names[index]), str(feature_names[index])),
+            "英文特征名": str(feature_names[index]),
+            "折外置换重要性": f"{importances[index]:.6f}",
+        }
+        for rank, index in enumerate(order, start=1)
+    ]
+    save_csv("随机森林置换重要性.csv", importance_rows)
+
 
 def plot_example_curves(dataset: dict[str, np.ndarray]) -> None:
     curves = dataset["curves"]
@@ -373,7 +440,7 @@ def plot_example_curves(dataset: dict[str, np.ndarray]) -> None:
     note.text(
         0.14,
         0.21,
-        "每条曲线均匀重采样为 96 点",
+        "图示为 96 点；模型同时比较 48/72/96 点",
         fontsize=10,
         color=SLATE,
         transform=note.transAxes,
@@ -593,7 +660,7 @@ def plot_model_comparison() -> None:
         "Q95-HD relative TPV",
         "MHD relative TPV",
         "DTW relative pitch",
-        "Weighted MHD (nested)",
+        "Tuned MHD (nested)",
         "RF descriptors",
     ]
     data = data.set_index("method").loc[order].reset_index()
@@ -688,12 +755,26 @@ def draw_confusion(ax, labels: np.ndarray, predictions: np.ndarray, title: str, 
 
 def plot_confusions(
     labels: np.ndarray,
-    weighted_predictions: np.ndarray,
+    tuned_predictions: np.ndarray,
     rf_predictions: np.ndarray,
+    tuned_accuracy: float,
+    rf_accuracy: float,
 ) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(11.7, 5.2))
-    draw_confusion(axes[0], labels, weighted_predictions, "加权 MHD（嵌套）", 0.40)
-    draw_confusion(axes[1], labels, rf_predictions, "随机森林（统计描述符）", 0.57)
+    draw_confusion(
+        axes[0],
+        labels,
+        tuned_predictions,
+        "多参数 MHD（嵌套）",
+        tuned_accuracy,
+    )
+    draw_confusion(
+        axes[1],
+        labels,
+        rf_predictions,
+        "随机森林（统计描述符）",
+        rf_accuracy,
+    )
     fig.suptitle("两类模型的折外混淆结构", fontsize=16, weight="bold", color=NAVY)
     fig.text(
         0.5,
@@ -751,6 +832,62 @@ def plot_sensitivity() -> None:
     save_figure(fig, "sensitivity_cn.png")
 
 
+def plot_repeated_validation() -> None:
+    data = pd.read_csv(RAW_TABLES / "repeated_validation.csv")
+    methods = [
+        "MHD relative TPV",
+        "Tuned MHD (nested)",
+        "RF descriptors",
+    ]
+    colors = [TEAL, GOLD, NAVY]
+    fig, ax = plt.subplots(figsize=(8.6, 4.8))
+    rng = np.random.default_rng(2026)
+    for index, (method, color) in enumerate(zip(methods, colors), start=1):
+        values = 100 * data.loc[data["method"] == method, "accuracy"].to_numpy()
+        jitter = rng.uniform(-0.08, 0.08, size=len(values))
+        ax.scatter(
+            np.full(len(values), index) + jitter,
+            values,
+            s=42,
+            color=color,
+            alpha=0.72,
+            edgecolor="white",
+            linewidth=0.5,
+        )
+        mean = values.mean()
+        std = values.std(ddof=1)
+        ax.errorbar(
+            index,
+            mean,
+            yerr=std,
+            fmt="D",
+            color=color,
+            markersize=7,
+            capsize=5,
+            linewidth=2,
+        )
+        ax.text(
+            index,
+            mean + std + 1.4,
+            f"{mean:.1f}% ± {std:.1f}%",
+            ha="center",
+            color=color,
+            weight="bold",
+            fontsize=9.5,
+        )
+    ax.axhline(20, color=CORAL, linestyle="--", linewidth=1.2)
+    ax.set_xticks(
+        range(1, 4),
+        ["固定权重 MHD", "多参数 MHD\n（嵌套选择）", "随机森林"],
+    )
+    ax.set_ylabel("每次五折折外准确率（%）")
+    ax.set_title("不同随机分折下的模型稳定性\n圆点为 5 组外层随机种子，菱形为均值")
+    ax.set_ylim(15, max(65, 100 * data["accuracy"].max() + 8))
+    clean_axis(ax)
+    fig.tight_layout()
+    save_figure(fig, "repeated_validation_cn.png")
+
+
 def plot_feature_importance(importances: np.ndarray, names: np.ndarray) -> None:
     top = np.argsort(importances)[-12:]
     values = importances[top]
@@ -760,8 +897,8 @@ def plot_feature_importance(importances: np.ndarray, names: np.ndarray) -> None:
     fig, ax = plt.subplots(figsize=(8.5, 5.5))
     bars = ax.barh(np.arange(len(top)), values, color=colors, height=0.68)
     ax.set_yticks(np.arange(len(top)), labels)
-    ax.set_xlabel("五折平均特征重要性")
-    ax.set_title("随机森林最重要的 12 个音乐描述符")
+    ax.set_xlabel("折外平衡准确率的平均下降量")
+    ax.set_title("随机森林最重要的 12 个音乐描述符（置换重要性）")
     for bar, value in zip(bars, values):
         ax.text(
             value + 0.002,
@@ -770,22 +907,29 @@ def plot_feature_importance(importances: np.ndarray, names: np.ndarray) -> None:
             va="center",
             fontsize=8.8,
         )
-    ax.set_xlim(0, values.max() * 1.22)
+    left = min(0.0, float(values.min()) * 1.15)
+    right = max(0.01, float(values.max()) * 1.22)
+    ax.set_xlim(left, right)
     clean_axis(ax, grid_axis="x")
     fig.tight_layout()
     save_figure(fig, "feature_importance_cn.png")
 
 
-def plot_dashboard(stats: dict) -> None:
+def plot_dashboard(
+    stats: dict,
+    n_samples: int,
+    tuned_accuracy: float,
+    rf_accuracy: float,
+) -> None:
     fig, ax = plt.subplots(figsize=(12.0, 3.25))
     ax.set_xlim(0, 12)
     ax.set_ylim(0, 3.25)
     ax.axis("off")
     cards = [
-        ("400", "五类平衡样本", NAVY),
-        ("40.05%", "最佳几何模型准确率", TEAL),
-        ("56.99%", "多特征能力对照", GOLD),
-        ("0.002", "标签置换检验 $p$ 值", CORAL),
+        (f"{n_samples}", "五类平衡样本", NAVY),
+        (f"{100 * tuned_accuracy:.2f}%", "最佳几何模型准确率", TEAL),
+        (f"{100 * rf_accuracy:.2f}%", "多特征能力对照", GOLD),
+        (f"{stats['permutation_p']:.4f}", "组级置换检验 $p$ 值", CORAL),
     ]
     for index, (value, label, color) in enumerate(cards):
         x = 0.25 + index * 2.95
@@ -837,36 +981,65 @@ def main() -> None:
     labels = dataset["labels"]
     groups = dataset["groups"]
 
-    stats = distance_statistics(matrices["mhd_tpv"], labels, seed=2026)
+    stats = distance_statistics(
+        matrices["mhd_tpv"],
+        labels,
+        groups,
+        seed=2026,
+    )
     genre_matrix = np.loadtxt(
         RAW_TABLES / "genre_mean_distance.csv", delimiter=",", skiprows=1
     )
-    velocity_matrices = {
-        weight: sensitivity[f"velocity_{weight:.2f}"]
+    parameter_matrices = {
+        (n_points, weight): sensitivity[
+            f"points_{n_points}_velocity_{weight:.2f}"
+        ]
+        for n_points in (48, 72, 96)
         for weight in (0.0, 0.10, 0.25, 0.50)
     }
-    weighted_summary, weighted_predictions, _ = evaluate_weighted_mhd(
-        velocity_matrices, labels, groups
+    tuned_summary, tuned_predictions, _ = evaluate_tuned_mhd(
+        parameter_matrices,
+        labels,
+        groups,
     )
     rf_summary, rf_predictions, _, importances = evaluate_random_forest(
         dataset["features"], labels, groups
     )
 
     export_tables(dataset, stats, genre_matrix)
-    plot_dashboard(stats)
+    export_model_diagnostics(
+        labels,
+        tuned_predictions,
+        rf_predictions,
+        importances,
+        dataset["feature_names"],
+    )
+    plot_dashboard(
+        stats,
+        len(labels),
+        tuned_summary["accuracy"],
+        rf_summary["accuracy"],
+    )
     plot_example_curves(dataset)
     plot_synthetic()
     plot_distance_distribution(stats)
     plot_heatmap(genre_matrix)
     plot_model_comparison()
-    plot_confusions(labels, weighted_predictions, rf_predictions)
+    plot_confusions(
+        labels,
+        tuned_predictions,
+        rf_predictions,
+        tuned_summary["accuracy"],
+        rf_summary["accuracy"],
+    )
     plot_mds(matrices["mhd_tpv"], labels)
     plot_feature_importance(importances, dataset["feature_names"])
     plot_sensitivity()
+    plot_repeated_validation()
 
     print(
-        "[paper-assets] weighted MHD accuracy="
-        f"{weighted_summary['accuracy']:.3f}, RF accuracy={rf_summary['accuracy']:.3f}"
+        "[paper-assets] tuned MHD accuracy="
+        f"{tuned_summary['accuracy']:.3f}, RF accuracy={rf_summary['accuracy']:.3f}"
     )
     print(f"[paper-assets] figures: {PAPER_FIGURES}")
     print(f"[paper-assets] tables: {PAPER_TABLES}")
