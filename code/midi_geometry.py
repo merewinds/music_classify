@@ -254,6 +254,35 @@ def melody_features(melody: np.ndarray) -> tuple[np.ndarray, list[str]]:
     )
     beat_fraction = np.mod(t, 1.0)
     offbeat = np.mean(np.minimum(beat_fraction, 1.0 - beat_fraction) > 0.10)
+    phase = (t - t[0]) / duration
+    pitch_centered = pitch - pitch.mean()
+    contour_slope = float(np.polyfit(phase, pitch_centered, 1)[0])
+    pitch_autocorrelation = (
+        float(np.corrcoef(pitch_centered[:-1], pitch_centered[1:])[0, 1])
+        if pitch.std() > 1e-9
+        else 0.0
+    )
+    interval_bins = np.asarray([0, 1, 3, 5, 8, 13, np.inf])
+    interval_classes = np.histogram(abs_intervals, bins=interval_bins)[0].astype(float)
+    interval_classes /= max(interval_classes.sum(), 1.0)
+    signed_intervals = np.clip(np.rint(intervals).astype(int), -12, 12) + 12
+    interval_hist = np.bincount(signed_intervals, minlength=25).astype(float)
+    interval_hist /= max(interval_hist.sum(), 1.0)
+    interval_nz = interval_hist[interval_hist > 0]
+    interval_entropy = float(-(interval_nz * np.log2(interval_nz)).sum())
+    velocity_diff = np.diff(velocity)
+    pitch_velocity_correlation = (
+        float(np.corrcoef(pitch, velocity)[0, 1])
+        if pitch.std() > 1e-9 and velocity.std() > 1e-9
+        else 0.0
+    )
+    ioi_hist = np.histogram(
+        np.log1p(ioi),
+        bins=np.linspace(np.log1p(ioi).min(), np.log1p(ioi).max() + 1e-9, 9),
+    )[0].astype(float)
+    ioi_hist /= max(ioi_hist.sum(), 1.0)
+    ioi_nz = ioi_hist[ioi_hist > 0]
+    ioi_entropy = float(-(ioi_nz * np.log2(ioi_nz)).sum())
 
     names = [
         "duration_beats",
@@ -282,8 +311,23 @@ def melody_features(melody: np.ndarray) -> tuple[np.ndarray, list[str]]:
         "ioi_q25",
         "ioi_q75",
         "offbeat_fraction",
+        "rhythm_regularity",
+        "ioi_entropy",
+        "contour_slope",
+        "pitch_autocorrelation",
+        "interval_entropy",
+        "interval_unison_fraction",
+        "interval_step_fraction",
+        "interval_third_fourth_fraction",
+        "interval_fifth_seventh_fraction",
+        "interval_octave_fraction",
+        "interval_large_fraction",
+        "velocity_change_abs_mean",
+        "velocity_change_std",
+        "pitch_velocity_correlation",
         "pitch_class_entropy",
         "pitch_class_peak",
+        "pitch_class_top3",
     ] + [f"pc_{i}" for i in range(12)]
 
     values = [
@@ -313,12 +357,65 @@ def melody_features(melody: np.ndarray) -> tuple[np.ndarray, list[str]]:
         np.quantile(ioi, 0.25),
         np.quantile(ioi, 0.75),
         offbeat,
+        1.0 / (1.0 + ioi.std() / max(ioi.mean(), 1e-9)),
+        ioi_entropy,
+        contour_slope,
+        pitch_autocorrelation,
+        interval_entropy,
+        *interval_classes.tolist(),
+        np.mean(np.abs(velocity_diff)),
+        velocity_diff.std(),
+        pitch_velocity_correlation,
         pc_entropy,
         pc_hist.max(),
+        np.sort(pc_hist)[-3:].sum(),
         *pc_hist.tolist(),
     ]
     values = np.nan_to_num(np.asarray(values, dtype=np.float64))
     return values, names
+
+
+def feature_group_indices(feature_names: list[str] | np.ndarray) -> dict[str, np.ndarray]:
+    """Map descriptor names to interpretable feature groups for ablation."""
+    groups: dict[str, list[int]] = {
+        "scale": [],
+        "pitch": [],
+        "interval_contour": [],
+        "dynamics": [],
+        "rhythm": [],
+        "tonality": [],
+    }
+    for index, raw_name in enumerate(feature_names):
+        name = str(raw_name)
+        if name in {"duration_beats", "onset_count", "onset_density"}:
+            groups["scale"].append(index)
+        elif name.startswith("velocity") or name == "pitch_velocity_correlation":
+            groups["dynamics"].append(index)
+        elif name.startswith("ioi") or name in {
+            "offbeat_fraction",
+            "rhythm_regularity",
+        }:
+            groups["rhythm"].append(index)
+        elif name.startswith("pc_") or name.startswith("pitch_class"):
+            groups["tonality"].append(index)
+        elif name.startswith("interval") or name in {
+            "step_fraction",
+            "leap_fraction",
+            "repeat_fraction",
+            "ascending_fraction",
+            "descending_fraction",
+            "direction_change",
+            "contour_slope",
+            "pitch_autocorrelation",
+        }:
+            groups["interval_contour"].append(index)
+        else:
+            groups["pitch"].append(index)
+    return {
+        name: np.asarray(indices, dtype=int)
+        for name, indices in groups.items()
+        if indices
+    }
 
 
 def load_one_midi(
