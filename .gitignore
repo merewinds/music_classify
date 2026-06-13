@@ -8,3 +8,7 @@ __pycache__/
 
 # 实验结果图片
 results/figures/
+#实验原问题
+require.md
+#实验缓存文件
+results
