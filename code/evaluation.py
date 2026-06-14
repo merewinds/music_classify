@@ -52,18 +52,36 @@ def predict_knn_proba(
     labels: np.ndarray,
     k: int,
 ) -> np.ndarray:
-    probabilities = np.zeros((len(test_idx), len(GENRES)), dtype=np.float64)
-    k = min(k, len(train_idx))
-    for row, test in enumerate(test_idx):
-        ordered = train_idx[
-            np.argsort(matrix[test, train_idx], kind="stable")[:k]
-        ]
-        for rank, neighbor in enumerate(ordered):
-            class_index = GENRES.index(str(labels[neighbor]))
-            probabilities[row, class_index] += 1.0
-            probabilities[row, class_index] += 1e-9 * (k - rank)
-        probabilities[row] /= probabilities[row].sum()
-    return probabilities
+    return predict_knn_proba_candidates(
+        matrix, train_idx, test_idx, labels, (k,)
+    )[int(k)]
+
+
+def predict_knn_proba_candidates(
+    matrix: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    labels: np.ndarray,
+    candidates: tuple[int, ...] = K_CANDIDATES,
+) -> dict[int, np.ndarray]:
+    """Compute several K-NN probability tables from one neighbor ordering."""
+    requested_k = tuple(sorted({int(k) for k in candidates}))
+    maximum = min(max(requested_k), len(train_idx))
+    distances = matrix[np.ix_(test_idx, train_idx)]
+    order = np.argsort(distances, axis=1, kind="stable")[:, :maximum]
+    ordered_labels = labels[train_idx[order]]
+    result = {}
+    for requested in requested_k:
+        k = min(requested, len(train_idx))
+        weights = 1.0 + 1e-9 * (k - np.arange(k, dtype=float))
+        probabilities = np.zeros((len(test_idx), len(GENRES)), dtype=np.float64)
+        for class_index, genre in enumerate(GENRES):
+            probabilities[:, class_index] = (
+                (ordered_labels[:, :k] == genre) * weights
+            ).sum(axis=1)
+        probabilities /= probabilities.sum(axis=1, keepdims=True)
+        result[requested] = probabilities
+    return result
 
 
 def predictions_from_probabilities(probabilities: np.ndarray) -> np.ndarray:
@@ -149,10 +167,10 @@ def choose_k(
             global_train = train_idx[inner_train]
             global_test = train_idx[inner_test]
             assert_group_separation(global_train, global_test, groups)
-            for k in candidates:
-                probabilities = predict_knn_proba(
-                    matrix, global_train, global_test, labels, k
-                )
+            probability_grid = predict_knn_proba_candidates(
+                matrix, global_train, global_test, labels, candidates
+            )
+            for k, probabilities in probability_grid.items():
                 predictions = predictions_from_probabilities(probabilities)
                 scores[k].append(
                     balanced_accuracy_score(labels[global_test], predictions)
@@ -429,10 +447,14 @@ def evaluate_tuned_distance_grid(
                 global_test = train_idx[inner_test]
                 assert_group_separation(global_train, global_test, groups)
                 for parameters, matrix in matrices.items():
-                    for k in K_CANDIDATES:
-                        fold_probabilities = predict_knn_proba(
-                            matrix, global_train, global_test, labels, k
-                        )
+                    probability_grid = predict_knn_proba_candidates(
+                        matrix,
+                        global_train,
+                        global_test,
+                        labels,
+                        K_CANDIDATES,
+                    )
+                    for k, fold_probabilities in probability_grid.items():
                         fold_predictions = predictions_from_probabilities(
                             fold_probabilities
                         )
@@ -577,10 +599,14 @@ def evaluate_fusion(
                     rf.predict_proba(features[global_test]), rf.classes_
                 )
                 for parameters, matrix in mhd_matrices.items():
-                    for k in K_CANDIDATES:
-                        mhd_probabilities = predict_knn_proba(
-                            matrix, global_train, global_test, labels, k
-                        )
+                    probability_grid = predict_knn_proba_candidates(
+                        matrix,
+                        global_train,
+                        global_test,
+                        labels,
+                        K_CANDIDATES,
+                    )
+                    for k, mhd_probabilities in probability_grid.items():
                         for alpha in alphas:
                             fused = (
                                 alpha * rf_probabilities
@@ -803,6 +829,203 @@ def feature_ablation(
     for row in rows:
         row["balanced_accuracy_change"] = row["balanced_accuracy"] - baseline
     return rows
+
+
+def repeated_feature_ablation(
+    features: np.ndarray,
+    feature_names: np.ndarray,
+    labels: np.ndarray,
+    groups: np.ndarray,
+    outer_seeds: tuple[int, ...] = REPEAT_OUTER_SEEDS,
+    n_estimators: int = 400,
+) -> tuple[list[dict], list[dict]]:
+    """Repeat grouped ablation across outer splits and summarize paired changes."""
+    rows = []
+    for outer_seed in outer_seeds:
+        for row in feature_ablation(
+            features,
+            feature_names,
+            labels,
+            groups,
+            outer_seed=outer_seed,
+            n_estimators=n_estimators,
+        ):
+            rows.append({"outer_seed": outer_seed, **row})
+
+    aggregate = []
+    removed_groups = sorted(
+        {row["removed_group"] for row in rows if row["removed_group"] != "none"}
+    )
+    for removed_group in removed_groups:
+        selected = [row for row in rows if row["removed_group"] == removed_group]
+        changes = np.asarray(
+            [row["balanced_accuracy_change"] for row in selected], dtype=float
+        )
+        aggregate.append(
+            {
+                "removed_group": removed_group,
+                "repeats": len(selected),
+                "balanced_accuracy_change_mean": float(changes.mean()),
+                "balanced_accuracy_change_std": (
+                    float(changes.std(ddof=1)) if len(changes) > 1 else 0.0
+                ),
+                "balanced_accuracy_change_min": float(changes.min()),
+                "balanced_accuracy_change_max": float(changes.max()),
+                "negative_change_fraction": float(np.mean(changes < 0)),
+            }
+        )
+    return rows, aggregate
+
+
+def grouped_permutation_importance(
+    features: np.ndarray,
+    feature_names: np.ndarray,
+    labels: np.ndarray,
+    groups: np.ndarray,
+    outer_seed: int = 42,
+    n_estimators: int = 500,
+    repeats: int = 10,
+) -> list[dict]:
+    """Jointly permute each descriptor group on held-out folds."""
+    splitter = StratifiedGroupKFold(
+        n_splits=5, shuffle=True, random_state=outer_seed
+    )
+    feature_groups = feature_group_indices(feature_names)
+    drops = {name: [] for name in feature_groups}
+    for fold, (train_idx, test_idx) in enumerate(
+        splitter.split(features, labels, groups), start=1
+    ):
+        assert_group_separation(train_idx, test_idx, groups)
+        model = make_random_forest(
+            120_000 + outer_seed * 10 + fold, n_estimators=n_estimators
+        )
+        model.fit(features[train_idx], labels[train_idx])
+        baseline = balanced_accuracy_score(
+            labels[test_idx], model.predict(features[test_idx])
+        )
+        for group_index, (name, columns) in enumerate(feature_groups.items()):
+            rng = np.random.default_rng(
+                130_000 + outer_seed * 100 + fold * 10 + group_index
+            )
+            for _ in range(repeats):
+                permuted = features[test_idx].copy()
+                order = rng.permutation(len(test_idx))
+                permuted[:, columns] = permuted[order][:, columns]
+                score = balanced_accuracy_score(
+                    labels[test_idx], model.predict(permuted)
+                )
+                drops[name].append(baseline - score)
+
+    rows = []
+    for name, values in drops.items():
+        array = np.asarray(values, dtype=float)
+        rows.append(
+            {
+                "feature_group": name,
+                "outer_seed": outer_seed,
+                "fold_repeats": len(array),
+                "importance_mean": float(array.mean()),
+                "importance_std": (
+                    float(array.std(ddof=1)) if len(array) > 1 else 0.0
+                ),
+                "importance_ci_low": float(np.quantile(array, 0.025)),
+                "importance_ci_high": float(np.quantile(array, 0.975)),
+            }
+        )
+    return rows
+
+
+def aggregate_validation_runs(rows: list[dict]) -> list[dict]:
+    """Summarize complete sample-seed and split-seed runs by model."""
+    aggregate = []
+    for method in (
+        "Tuned MHD (nested)",
+        "RF descriptors",
+        "MHD-RF probability fusion",
+    ):
+        selected = [row for row in rows if row["method"] == method]
+        if not selected:
+            continue
+        accuracy = np.asarray([row["accuracy"] for row in selected], dtype=float)
+        macro_f1 = np.asarray([row["macro_f1"] for row in selected], dtype=float)
+        aggregate.append(
+            {
+                "method": method,
+                "repeats": len(selected),
+                "sample_seeds": len({row["sample_seed"] for row in selected}),
+                "outer_seeds": len({row["outer_seed"] for row in selected}),
+                "accuracy_mean": float(accuracy.mean()),
+                "accuracy_std": (
+                    float(accuracy.std(ddof=1)) if len(accuracy) > 1 else 0.0
+                ),
+                "accuracy_min": float(accuracy.min()),
+                "accuracy_max": float(accuracy.max()),
+                "macro_f1_mean": float(macro_f1.mean()),
+                "macro_f1_std": (
+                    float(macro_f1.std(ddof=1)) if len(macro_f1) > 1 else 0.0
+                ),
+            }
+        )
+    return aggregate
+
+
+def paired_bootstrap_model_differences(
+    rows: list[dict],
+    iterations: int = 10_000,
+    seed: int = 2026,
+) -> list[dict]:
+    """Bootstrap paired differences across complete experiment runs."""
+    comparisons = (
+        ("Tuned MHD (nested)", "RF descriptors"),
+        ("RF descriptors", "MHD-RF probability fusion"),
+    )
+    by_key = {
+        (int(row["sample_seed"]), int(row["outer_seed"]), row["method"]): row
+        for row in rows
+    }
+    run_keys = sorted(
+        {
+            (int(row["sample_seed"]), int(row["outer_seed"]))
+            for row in rows
+        }
+    )
+    rng = np.random.default_rng(seed)
+    result = []
+    for left, right in comparisons:
+        differences = np.asarray(
+            [
+                by_key[(*run_key, left)]["accuracy"]
+                - by_key[(*run_key, right)]["accuracy"]
+                for run_key in run_keys
+            ],
+            dtype=float,
+        )
+        if iterations > 0:
+            indices = rng.integers(
+                0, len(differences), size=(iterations, len(differences))
+            )
+            bootstrap_means = differences[indices].mean(axis=1)
+            low, high = np.quantile(bootstrap_means, (0.025, 0.975))
+        else:
+            low = high = differences.mean()
+        result.append(
+            {
+                "model_a": left,
+                "model_b": right,
+                "difference_definition": "accuracy(model_a)-accuracy(model_b)",
+                "paired_runs": len(differences),
+                "accuracy_difference_mean": float(differences.mean()),
+                "accuracy_difference_std": (
+                    float(differences.std(ddof=1))
+                    if len(differences) > 1
+                    else 0.0
+                ),
+                "bootstrap_ci_low": float(low),
+                "bootstrap_ci_high": float(high),
+                "positive_fraction": float(np.mean(differences > 0)),
+            }
+        )
+    return result
 
 
 def class_recall_rows(

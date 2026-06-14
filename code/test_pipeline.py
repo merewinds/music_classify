@@ -8,14 +8,22 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 try:
-    from .data_pipeline import build_duplicate_groups, melody_fingerprint
+    from .data_pipeline import (
+        build_duplicate_groups,
+        melody_fingerprint,
+        sampled_group_order,
+    )
     from .distance_models import _dtw_python, validate_distance_matrix
     from .evaluation import (
         assert_group_separation,
+        aggregate_validation_runs,
         evaluate_distance_metric,
+        paired_bootstrap_model_differences,
         predict_knn_proba,
+        predict_knn_proba_candidates,
     )
     from .midi_geometry import (
         _read_vlq,
@@ -26,13 +34,21 @@ try:
         parse_midi_note_ons,
         skyline_melody,
     )
+    from .paper_assets import preserve_method_taxonomy, sha256_file
 except ImportError:
-    from data_pipeline import build_duplicate_groups, melody_fingerprint
+    from data_pipeline import (
+        build_duplicate_groups,
+        melody_fingerprint,
+        sampled_group_order,
+    )
     from distance_models import _dtw_python, validate_distance_matrix
     from evaluation import (
         assert_group_separation,
+        aggregate_validation_runs,
         evaluate_distance_metric,
+        paired_bootstrap_model_differences,
         predict_knn_proba,
+        predict_knn_proba_candidates,
     )
     from midi_geometry import (
         _read_vlq,
@@ -43,6 +59,7 @@ except ImportError:
         parse_midi_note_ons,
         skyline_melody,
     )
+    from paper_assets import preserve_method_taxonomy, sha256_file
 
 
 def midi_file(midi_format: int, track: bytes, division: int = 480) -> bytes:
@@ -180,11 +197,77 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(probabilities.shape, (1, 5))
         self.assertAlmostEqual(float(probabilities.sum()), 1.0)
         self.assertTrue(np.all(probabilities >= 0))
+        grid = predict_knn_proba_candidates(
+            matrix,
+            np.asarray([0, 1, 2, 3]),
+            np.asarray([4]),
+            labels,
+            candidates=(1, 3, 7),
+        )
+        np.testing.assert_allclose(grid[3], probabilities)
+        self.assertAlmostEqual(float(grid[7].sum()), 1.0)
 
     def test_group_overlap_is_rejected(self) -> None:
         groups = np.asarray(["a", "b", "a"])
         with self.assertRaisesRegex(RuntimeError, "group leakage"):
             assert_group_separation(np.asarray([0, 1]), np.asarray([2]), groups)
+
+    def test_sample_group_order_is_reproducible_and_seed_sensitive(self) -> None:
+        groups = [f"group-{index:02d}" for index in range(20)]
+        first = sampled_group_order(groups, 2026, "Classical")
+        repeated = sampled_group_order(groups, 2026, "Classical")
+        changed = sampled_group_order(groups, 2027, "Classical")
+        self.assertEqual(first, repeated)
+        self.assertNotEqual(first, changed)
+        self.assertEqual(set(first), set(groups))
+
+    def test_validation_aggregation_and_paired_bootstrap(self) -> None:
+        rows = []
+        methods = (
+            "Tuned MHD (nested)",
+            "RF descriptors",
+            "MHD-RF probability fusion",
+        )
+        for sample_seed in (2026, 2027, 2028):
+            for outer_seed in (11, 23, 42, 67, 101):
+                for method, accuracy in zip(methods, (0.40, 0.56, 0.54)):
+                    rows.append(
+                        {
+                            "sample_seed": sample_seed,
+                            "outer_seed": outer_seed,
+                            "method": method,
+                            "accuracy": accuracy,
+                            "balanced_accuracy": accuracy,
+                            "macro_f1": accuracy,
+                            "fold_mean": accuracy,
+                            "fold_std": 0.01,
+                        }
+                    )
+        aggregate = aggregate_validation_runs(rows)
+        self.assertEqual({row["repeats"] for row in aggregate}, {15})
+        paired = paired_bootstrap_model_differences(
+            rows, iterations=200, seed=2026
+        )
+        self.assertAlmostEqual(paired[0]["accuracy_difference_mean"], -0.16)
+        self.assertAlmostEqual(paired[1]["accuracy_difference_mean"], 0.02)
+
+    def test_method_figure_is_preserved_and_has_no_version_title(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "method_taxonomy_cn.png"
+            prompt = root / "method_taxonomy_cn.prompt.txt"
+            output = root / "output"
+            Image.new("RGB", (2, 2), color="white").save(source)
+            prompt.write_text("academic method diagram", encoding="utf-8")
+            before = sha256_file(source)
+            metadata = preserve_method_taxonomy(source, prompt, output)
+            self.assertEqual(before, sha256_file(source))
+            self.assertEqual(metadata["sha256"], before)
+            self.assertTrue((output / source.name).exists())
+        asset_source = Path(__file__).with_name("paper_assets.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn('"v3 ', asset_source)
 
     def test_feature_groups_cover_every_descriptor_once(self) -> None:
         melody = np.column_stack(

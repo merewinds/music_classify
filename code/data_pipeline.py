@@ -25,7 +25,7 @@ DATA_DIR = ROOT / "adl-piano-midi"
 RESULTS_DIR = ROOT / "results" / "final"
 TABLE_DIR = RESULTS_DIR / "tables"
 CACHE_DIR = RESULTS_DIR / "cache"
-PIPELINE_VERSION = "v3"
+PIPELINE_VERSION = "v4"
 GENRES = ("Classical", "Jazz", "Rock", "Blues", "Electronic")
 
 
@@ -262,6 +262,20 @@ def build_duplicate_groups(index_rows: list[dict]) -> tuple[list[dict], list[dic
     return augmented, sorted(group_rows, key=lambda row: row["group"]), summary
 
 
+def sampling_rng(seed: int, genre: str) -> np.random.Generator:
+    """Return a deterministic, genre-specific random generator."""
+    return np.random.default_rng(
+        np.random.SeedSequence([int(seed), GENRES.index(genre)])
+    )
+
+
+def sampled_group_order(group_ids: list[str], seed: int, genre: str) -> list[str]:
+    """Shuffle group identifiers reproducibly without coupling genres."""
+    ordered = np.asarray(sorted(group_ids), dtype=object)
+    rng = sampling_rng(seed, genre)
+    return [str(value) for value in ordered[rng.permutation(len(ordered))]]
+
+
 def _loaded_cache_is_valid(
     result: dict[str, np.ndarray], requested: int, n_points: int
 ) -> bool:
@@ -293,6 +307,7 @@ def sample_dataset(
     seed: int,
     workers: int,
     force: bool = False,
+    write_audit_tables: bool = True,
 ) -> dict[str, np.ndarray]:
     cache_path = dataset_cache_path(requested_per_genre, n_points, seed)
     if cache_path.exists() and not force:
@@ -304,24 +319,39 @@ def sample_dataset(
 
     index_rows = build_dataset_index(workers=workers, force=force)
     indexed, group_rows, audit = build_duplicate_groups(index_rows)
-    save_csv(TABLE_DIR / "data_audit_files.csv", indexed)
-    save_csv(TABLE_DIR / "data_audit_groups.csv", group_rows)
+    if write_audit_tables:
+        save_csv(TABLE_DIR / "data_audit_files.csv", indexed)
+        save_csv(TABLE_DIR / "data_audit_groups.csv", group_rows)
+        conflict_groups = [row for row in group_rows if int(row["cross_genre"])]
+        save_csv(TABLE_DIR / "cross_genre_conflicts.csv", conflict_groups)
+        conflict_summary = []
+        for genre_pair in sorted({row["genres"] for row in conflict_groups}):
+            selected = [row for row in conflict_groups if row["genres"] == genre_pair]
+            conflict_summary.append(
+                {
+                    "genres": genre_pair,
+                    "group_count": len(selected),
+                    "file_count": sum(int(row["versions"]) for row in selected),
+                    "representative_title": selected[0]["titles"],
+                    "representative_files": selected[0]["files"],
+                }
+            )
+        save_csv(TABLE_DIR / "cross_genre_conflict_summary.csv", conflict_summary)
 
-    rng = np.random.default_rng(seed)
     selected_by_genre: dict[str, list[dict]] = {}
     failure_rows: list[dict] = []
     for genre in GENRES:
+        rng = sampling_rng(seed, genre)
         candidates: dict[str, list[dict]] = defaultdict(list)
         for row in indexed:
             if row["genre"] == genre and not int(row["cross_genre"]):
                 candidates[row["group"]].append(row)
 
-        ordered_groups = np.asarray(sorted(candidates), dtype=object)
-        ordered_groups = ordered_groups[rng.permutation(len(ordered_groups))]
+        ordered_groups = sampled_group_order(list(candidates), seed, genre)
         selected = []
         failures = Counter()
         for group in ordered_groups:
-            versions = candidates[str(group)]
+            versions = candidates[group]
             version_order = rng.permutation(len(versions))
             parsed = None
             chosen = None
@@ -438,9 +468,10 @@ def sample_dataset(
             "selected_samples": actual_per_genre * len(GENRES),
         }
     )
-    save_csv(TABLE_DIR / "data_audit_summary.csv", audit_rows)
-    save_csv(TABLE_DIR / "sample_metadata.csv", metadata_rows)
-    save_csv(TABLE_DIR / "sample_failures.csv", failure_rows)
+    if write_audit_tables:
+        save_csv(TABLE_DIR / "data_audit_summary.csv", audit_rows)
+        save_csv(TABLE_DIR / "sample_metadata.csv", metadata_rows)
+        save_csv(TABLE_DIR / "sample_failures.csv", failure_rows)
 
     result = {
         "curves": np.asarray(curves, dtype=np.float64),

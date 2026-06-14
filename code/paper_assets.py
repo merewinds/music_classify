@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import shutil
 import sys
@@ -32,6 +33,8 @@ PAPER_FIGURES = RESULTS_DIR / "figures_paper"
 REPORT_FIGURES = ROOT / "report_clk" / "figures"
 SUMMARY_FILE = RESULTS_DIR / "summary.json"
 PREDICTION_FILE = RESULTS_DIR / "predictions_primary.npz"
+METHOD_FIGURE = REPORT_FIGURES / "method_taxonomy_cn.png"
+METHOD_PROMPT = REPORT_FIGURES / "method_taxonomy_cn.prompt.txt"
 
 NAVY = "#17365D"
 BLUE = "#2F75B5"
@@ -157,6 +160,51 @@ def save_figure(fig: plt.Figure, filename: str) -> None:
     plt.close(fig)
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def preserve_method_taxonomy(
+    source: Path = METHOD_FIGURE,
+    prompt_file: Path = METHOD_PROMPT,
+    output_dir: Path = PAPER_FIGURES,
+) -> dict:
+    """Record and copy the curated method graphic without modifying its source."""
+    if not source.exists():
+        raise FileNotFoundError(f"curated method figure is missing: {source}")
+    if not prompt_file.exists():
+        raise FileNotFoundError(f"method figure prompt is missing: {prompt_file}")
+    image = plt.imread(source)
+    height, width = image.shape[:2]
+    try:
+        source_label = str(source.relative_to(ROOT))
+    except ValueError:
+        source_label = str(source)
+    try:
+        prompt_label = str(prompt_file.relative_to(ROOT))
+    except ValueError:
+        prompt_label = str(prompt_file)
+    metadata = {
+        "source": source_label,
+        "prompt_file": prompt_label,
+        "width_px": int(width),
+        "height_px": int(height),
+        "sha256": sha256_file(source),
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, output_dir / source.name)
+    shutil.copy2(prompt_file, output_dir / prompt_file.name)
+    (output_dir / "method_taxonomy_cn.metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return metadata
+
+
 def save_csv(filename: str, rows: list[dict]) -> None:
     if not rows:
         return
@@ -246,10 +294,13 @@ def export_tables(summary: dict, dataset: dict, predictions: dict) -> None:
 
     for source, target in (
         ("data_audit_summary.csv", "数据筛选审计.csv"),
-        ("feature_ablation.csv", "特征组消融.csv"),
+        ("cross_genre_conflict_summary.csv", "跨曲风冲突组摘要.csv"),
+        ("feature_ablation_repeated.csv", "重复特征组消融.csv"),
+        ("feature_group_importance.csv", "组级置换重要性.csv"),
         ("mcnemar_holm.csv", "模型配对检验.csv"),
         ("class_recall.csv", "分曲风召回率.csv"),
-        ("repeated_validation_summary.csv", "重复分组验证.csv"),
+        ("sample_split_validation_summary.csv", "样本与分组重复验证.csv"),
+        ("paired_model_differences.csv", "完整运行配对差异.csv"),
     ):
         rows = pd.read_csv(RAW_TABLES / source).to_dict("records")
         save_csv(target, rows)
@@ -344,113 +395,78 @@ def plot_data_funnel(summary: dict) -> None:
     save_figure(fig, "data_funnel_cn.png")
 
 
-def plot_method_taxonomy() -> None:
-    fig, ax = plt.subplots(figsize=(12.0, 4.6))
-    ax.set_xlim(0, 12)
-    ax.set_ylim(0, 4.6)
-    ax.axis("off")
-    columns = [
-        (
-            0.25,
-            "旋律表示",
-            ["skyline 主旋律", "相位均匀重采样", "相对音高与力度缩放"],
-            BLUE,
-        ),
-        (
-            3.25,
-            "几何与时序距离",
-            ["max-HD / Q95-HD", "Modified Hausdorff", "轨迹 RMSE / 多变量 DTW"],
-            TEAL,
-        ),
-        (
-            6.25,
-            "分类与融合",
-            ["距离 K-NN", "逻辑回归 / 随机森林", "MHD-RF 概率融合"],
-            GOLD,
-        ),
-        (
-            9.25,
-            "可信评价",
-            ["三重指纹防泄漏", "嵌套分组交叉验证", "CI / 配对检验 / 消融"],
-            CORAL,
-        ),
-    ]
-    for x, title, lines, color in columns:
-        ax.add_patch(
-            FancyBboxPatch(
-                (x, 0.55),
-                2.45,
-                3.25,
-                boxstyle="round,pad=0.04,rounding_size=0.10",
-                facecolor="white",
-                edgecolor=color,
-                linewidth=1.7,
-            )
-        )
-        ax.add_patch(
-            FancyBboxPatch(
-                (x, 3.18),
-                2.45,
-                0.62,
-                boxstyle="round,pad=0.02,rounding_size=0.08",
-                facecolor=color,
-                edgecolor=color,
-            )
-        )
-        ax.text(x + 1.225, 3.49, title, ha="center", va="center", color="white", weight="bold")
-        for row, line in enumerate(lines):
-            ax.text(x + 0.22, 2.72 - row * 0.74, f"{row + 1}. {line}", fontsize=10.5)
-    for left in (2.75, 5.75, 8.75):
-        ax.annotate(
-            "",
-            xy=(left + 0.43, 2.18),
-            xytext=(left + 0.02, 2.18),
-            arrowprops={"arrowstyle": "->", "color": SLATE, "lw": 1.6},
-        )
-    ax.text(0.25, 4.18, "v3 建模方法谱系", fontsize=17, weight="bold", color=NAVY)
-    save_figure(fig, "method_taxonomy_cn.png")
-
-
 def plot_example_curves(dataset: dict) -> None:
     curves = dataset["curves"]
     labels = dataset["labels"]
-    fig = plt.figure(figsize=(12.4, 7.1))
-    for index, genre in enumerate(GENRES, start=1):
-        ax = fig.add_subplot(2, 3, index, projection="3d")
-        curve = relative_curve(curves[np.flatnonzero(labels == genre)[0]], 0.25)
+    examples = [
+        relative_curve(curves[np.flatnonzero(labels == genre)[0]], 0.50)
+        for genre in GENRES
+    ]
+    velocity_limit = max(float(np.max(np.abs(curve[:, 2]))) for curve in examples)
+    fig, axes = plt.subplots(2, 3, figsize=(11.8, 6.5), sharex=True, sharey=True)
+    scatter = None
+    for ax, genre, curve in zip(axes.flat, GENRES, examples):
         color = GENRE_COLORS[genre]
-        ax.plot(curve[:, 0], curve[:, 1], curve[:, 2], color=color, lw=2.0)
-        ax.scatter(
-            curve[::8, 0],
-            curve[::8, 1],
-            curve[::8, 2],
-            s=14,
-            color=color,
+        ax.plot(curve[:, 0], curve[:, 1], color=color, lw=1.7, alpha=0.88)
+        scatter = ax.scatter(
+            curve[:, 0],
+            curve[:, 1],
+            c=curve[:, 2],
+            cmap="coolwarm",
+            vmin=-velocity_limit,
+            vmax=velocity_limit,
+            s=22,
             edgecolor="white",
-            linewidth=0.4,
+            linewidth=0.25,
+            zorder=3,
         )
         ax.set_title(f"{GENRE_CN[genre]}（{genre}）")
-        ax.set_xlabel("时间相位")
-        ax.set_ylabel("相对音高")
-        ax.view_init(elev=22, azim=-57)
-    note = fig.add_subplot(2, 3, 6)
+        ax.set_xlabel("归一化时间相位")
+        ax.set_ylabel("相对中位音高（八度）")
+        clean_axis(ax, "both")
+    note_slot = axes.flat[-1].get_position()
+    axes.flat[-1].remove()
+    note = fig.add_axes(note_slot)
+    note.set_xlim(0, 1)
+    note.set_ylim(0, 1)
     note.axis("off")
     note.add_patch(
         FancyBboxPatch(
-            (0.08, 0.18),
+            (0.08, 0.16),
             0.84,
-            0.62,
+            0.68,
             boxstyle="round,pad=0.03",
             facecolor=LIGHT,
             edgecolor="#CBD6E2",
         )
     )
-    note.text(0.15, 0.66, "统一三维表示", fontsize=14, weight="bold", color=NAVY)
-    note.text(0.15, 0.52, "时间：归一化相位", fontsize=11)
-    note.text(0.15, 0.40, "音高：移调不变的相对音高", fontsize=11)
-    note.text(0.15, 0.28, "力度：中心化后的加权动态", fontsize=11)
-    fig.suptitle("五类曲风的标准化三维旋律线示例", fontsize=17, weight="bold", color=NAVY)
-    fig.subplots_adjust(left=0.02, right=0.98, bottom=0.04, top=0.90, wspace=0.15, hspace=0.18)
+    note.text(0.15, 0.69, "二维投影与力度编码", fontsize=14, weight="bold", color=NAVY)
+    note.text(0.15, 0.54, "横轴：统一的时间相位", fontsize=10.5)
+    note.text(0.15, 0.42, "纵轴：移调不变的相对音高", fontsize=10.5)
+    note.text(0.15, 0.30, "颜色：中心化后的力度动态", fontsize=10.5)
+    if scatter is not None:
+        color_axis = note.inset_axes([0.15, 0.21, 0.70, 0.055])
+        colorbar = fig.colorbar(
+            scatter,
+            cax=color_axis,
+            orientation="horizontal",
+        )
+        colorbar.set_label("低力度 ← 加权力度 → 高力度", fontsize=9)
+        colorbar.ax.tick_params(labelsize=8)
+    fig.suptitle(
+        "五类曲风的标准化旋律线示例",
+        fontsize=16,
+        weight="bold",
+        color=NAVY,
+    )
+    fig.subplots_adjust(
+        left=0.075,
+        right=0.96,
+        bottom=0.09,
+        top=0.89,
+        wspace=0.24,
+        hspace=0.34,
+    )
     save_figure(fig, "example_curves_cn.png")
 
 
@@ -482,7 +498,7 @@ def plot_synthetic() -> None:
 def plot_distance_distribution(stats: dict) -> None:
     within, between = stats["within"], stats["between"]
     fig, axes = plt.subplots(
-        1, 2, figsize=(11.8, 4.7), gridspec_kw={"width_ratios": [1.65, 1]}
+        1, 2, figsize=(11.8, 4.7), gridspec_kw={"width_ratios": [1.75, 1]}
     )
     bins = np.linspace(
         min(within.min(), between.min()), np.quantile(between, 0.995), 55
@@ -505,41 +521,70 @@ def plot_distance_distribution(stats: dict) -> None:
     )
     axes[0].axvline(stats["within_mean"], color=TEAL, lw=1.8)
     axes[0].axvline(stats["between_mean"], color=GOLD, lw=1.8)
-    axes[0].set_title("异类距离整体右移，但分布仍明显重叠")
+    axes[0].set_title("距离分布：异类整体右移，但重叠仍然明显")
     axes[0].set_xlabel("Modified Hausdorff Distance")
     axes[0].set_ylabel("概率密度")
     axes[0].legend(frameon=False)
     clean_axis(axes[0])
 
-    parts = axes[1].violinplot(
-        [within, between],
-        positions=[1, 2],
-        showmedians=True,
-        showextrema=False,
-        widths=0.75,
+    axes[1].axis("off")
+    axes[1].add_patch(
+        FancyBboxPatch(
+            (0.04, 0.08),
+            0.92,
+            0.84,
+            transform=axes[1].transAxes,
+            boxstyle="round,pad=0.035,rounding_size=0.04",
+            facecolor=LIGHT,
+            edgecolor="#CBD6E2",
+            linewidth=1.2,
+        )
     )
-    for body, color in zip(parts["bodies"], [TEAL, GOLD]):
-        body.set_facecolor(color)
-        body.set_edgecolor("white")
-        body.set_alpha(0.72)
-    parts["cmedians"].set_color(NAVY)
-    axes[1].boxplot(
-        [within, between],
-        positions=[1, 2],
-        widths=0.22,
-        showfliers=False,
-        patch_artist=True,
-        boxprops={"facecolor": "white", "edgecolor": NAVY},
-        medianprops={"color": NAVY},
+    axes[1].text(
+        0.50,
+        0.74,
+        f"AUC = {stats['pair_auc']:.4f}",
+        transform=axes[1].transAxes,
+        ha="center",
+        va="center",
+        fontsize=24,
+        weight="bold",
+        color=NAVY,
     )
-    axes[1].set_xticks([1, 2], ["同曲风", "异曲风"])
-    axes[1].set_ylabel("MHD")
-    axes[1].set_title(
-        f"置换检验 $p={stats['permutation_p']:.4f}$\n"
-        f"配对 AUC={stats['pair_auc']:.4f}"
+    axes[1].text(
+        0.50,
+        0.52,
+        f"异类－同类均值差 = {stats['mean_gap']:.4f}",
+        transform=axes[1].transAxes,
+        ha="center",
+        fontsize=12,
+        weight="bold",
+        color=TEAL,
     )
-    clean_axis(axes[1])
-    fig.suptitle("同曲风与异曲风旋律的 MHD 差异", fontsize=16, weight="bold", color=NAVY)
+    axes[1].text(
+        0.50,
+        0.34,
+        "效应方向稳定，但判别能力较弱",
+        transform=axes[1].transAxes,
+        ha="center",
+        fontsize=11,
+        color=TEXT,
+    )
+    axes[1].text(
+        0.50,
+        0.19,
+        f"作品组置换检验：$p={stats['permutation_p']:.4f}$",
+        transform=axes[1].transAxes,
+        ha="center",
+        fontsize=9.5,
+        color=SLATE,
+    )
+    fig.suptitle(
+        "同曲风与异曲风旋律的 MHD 差异",
+        fontsize=16,
+        weight="bold",
+        color=NAVY,
+    )
     fig.tight_layout()
     save_figure(fig, "distance_distribution_cn.png")
 
@@ -653,7 +698,13 @@ def plot_model_comparison(summary: dict) -> None:
     means = np.asarray([100 * row["accuracy"] for row in data])
     lower = means - np.asarray([100 * row["accuracy_ci_low"] for row in data])
     upper = np.asarray([100 * row["accuracy_ci_high"] for row in data]) - means
-    colors = ["#98A6B5", "#63AAA5", TEAL, PURPLE, GOLD, "#8D75AA", BLUE, NAVY, CORAL]
+    colors = ["#AAB4BF"] * len(data)
+    for index, row in enumerate(data):
+        colors[index] = {
+            "Tuned MHD (nested)": GOLD,
+            "RF descriptors": NAVY,
+            "MHD-RF probability fusion": CORAL,
+        }.get(row["method"], "#AAB4BF")
     fig, ax = plt.subplots(figsize=(10.6, 6.4))
     y = np.arange(len(data))
     bars = ax.barh(
@@ -668,7 +719,7 @@ def plot_model_comparison(summary: dict) -> None:
     ax.axvline(20, color=CORAL, linestyle="--", linewidth=1.3)
     ax.set_yticks(y, [METHOD_CN[row["method"]] for row in data])
     ax.invert_yaxis()
-    ax.set_xlabel("折外准确率（%，误差线为分层 Bootstrap 95% CI）")
+    ax.set_xlabel("主实验折外准确率（%，误差线为条件 Bootstrap 95% CI）")
     ax.set_title("距离模型、描述符模型与概率融合的统一比较")
     for bar, value in zip(bars, means):
         ax.text(
@@ -712,17 +763,59 @@ def draw_confusion(ax, labels: np.ndarray, values: np.ndarray, title: str) -> No
 
 
 def plot_confusions(labels: np.ndarray, predictions: dict) -> None:
-    methods = (
-        "Tuned MHD (nested)",
-        "RF descriptors",
-        "MHD-RF probability fusion",
+    mhd_method = "Tuned MHD (nested)"
+    rf_method = "RF descriptors"
+    fig, axes = plt.subplots(
+        1, 3, figsize=(13.6, 4.8), gridspec_kw={"width_ratios": [1, 1, 0.82]}
     )
-    fig, axes = plt.subplots(1, 3, figsize=(15.0, 4.9))
-    for ax, method in zip(axes, methods):
-        draw_confusion(ax, labels, predictions[method], METHOD_CN[method])
-    fig.suptitle("三个主要模型的折外混淆结构", fontsize=16, weight="bold", color=NAVY)
-    fig.subplots_adjust(left=0.05, right=0.99, bottom=0.17, top=0.82, wspace=0.30)
+    draw_confusion(axes[0], labels, predictions[mhd_method], METHOD_CN[mhd_method])
+    draw_confusion(axes[1], labels, predictions[rf_method], METHOD_CN[rf_method])
+
+    mhd_matrix = confusion_matrix(
+        labels, predictions[mhd_method], labels=GENRES, normalize="true"
+    )
+    rf_matrix = confusion_matrix(
+        labels, predictions[rf_method], labels=GENRES, normalize="true"
+    )
+    recall_change = 100 * (np.diag(rf_matrix) - np.diag(mhd_matrix))
+    genre_names = [GENRE_CN[genre] for genre in GENRES]
+    colors = [TEAL if value >= 0 else CORAL for value in recall_change]
+    bars = axes[2].barh(np.arange(len(GENRES)), recall_change, color=colors)
+    axes[2].axvline(0, color=SLATE, linewidth=1)
+    axes[2].set_yticks(np.arange(len(GENRES)), genre_names)
+    axes[2].invert_yaxis()
+    axes[2].set_xlabel("召回率变化（百分点）")
+    axes[2].set_title("随机森林相对 MHD")
+    for bar, value in zip(bars, recall_change):
+        axes[2].text(
+            value + (0.8 if value >= 0 else -0.8),
+            bar.get_y() + bar.get_height() / 2,
+            f"{value:+.0f}",
+            va="center",
+            ha="left" if value >= 0 else "right",
+            fontsize=9,
+            weight="bold",
+        )
+    clean_axis(axes[2], "x")
+    fig.suptitle(
+        "主要模型的折外混淆结构与类别改进",
+        fontsize=16,
+        weight="bold",
+        color=NAVY,
+    )
+    fig.subplots_adjust(left=0.055, right=0.985, bottom=0.18, top=0.82, wspace=0.32)
     save_figure(fig, "confusion_models_cn.png")
+
+    fusion_method = "MHD-RF probability fusion"
+    fusion_fig, fusion_ax = plt.subplots(figsize=(6.2, 5.2))
+    draw_confusion(
+        fusion_ax,
+        labels,
+        predictions[fusion_method],
+        METHOD_CN[fusion_method],
+    )
+    fusion_fig.tight_layout()
+    save_figure(fusion_fig, "confusion_fusion_cn.png")
 
 
 def plot_feature_importance(predictions: dict) -> None:
@@ -737,12 +830,48 @@ def plot_feature_importance(predictions: dict) -> None:
     bars = ax.barh(np.arange(len(top)), values, color=colors, height=0.68)
     ax.set_yticks(np.arange(len(top)), labels)
     ax.set_xlabel("打乱特征后折外平衡准确率的平均下降量")
-    ax.set_title("随机森林最重要的音乐描述符（折外置换重要性）")
+    ax.set_title("单特征折外置换重要性（附录诊断）")
     for bar, value in zip(bars, values):
         ax.text(value + max(0.0005, values.max() * 0.025), bar.get_y() + 0.34, f"{value:.3f}", va="center", fontsize=8.5)
     clean_axis(ax, "x")
     fig.tight_layout()
     save_figure(fig, "feature_importance_cn.png")
+
+
+def plot_group_importance() -> None:
+    data = pd.read_csv(RAW_TABLES / "feature_group_importance.csv")
+    group_cn = {
+        "scale": "尺度与长度",
+        "pitch": "音高统计",
+        "interval_contour": "音程与轮廓",
+        "dynamics": "力度动态",
+        "rhythm": "节奏",
+        "tonality": "音级与调性",
+    }
+    data["label"] = data["feature_group"].map(group_cn)
+    data = data.sort_values("importance_mean")
+    values = 100 * data["importance_mean"].to_numpy(float)
+    low = values - 100 * data["importance_ci_low"].to_numpy(float)
+    high = 100 * data["importance_ci_high"].to_numpy(float) - values
+    fig, ax = plt.subplots(figsize=(8.7, 4.8))
+    y = np.arange(len(data))
+    ax.barh(y, values, color=TEAL, height=0.62)
+    ax.errorbar(
+        values,
+        y,
+        xerr=np.vstack((np.maximum(low, 0), np.maximum(high, 0))),
+        fmt="none",
+        ecolor=NAVY,
+        capsize=3,
+        linewidth=1.1,
+    )
+    ax.axvline(0, color=SLATE, linewidth=1)
+    ax.set_yticks(y, data["label"])
+    ax.set_xlabel("联合打乱该特征组后的平衡准确率下降（百分点）")
+    ax.set_title("随机森林的组级折外置换重要性")
+    clean_axis(ax, "x")
+    fig.tight_layout()
+    save_figure(fig, "feature_group_importance_cn.png")
 
 
 def plot_sensitivity() -> None:
@@ -770,7 +899,7 @@ def plot_sensitivity() -> None:
 
 
 def plot_repeated_validation() -> None:
-    data = pd.read_csv(RAW_TABLES / "repeated_validation.csv")
+    data = pd.read_csv(RAW_TABLES / "sample_split_validation.csv")
     methods = (
         "Tuned MHD (nested)",
         "RF descriptors",
@@ -778,11 +907,29 @@ def plot_repeated_validation() -> None:
     )
     colors = (GOLD, NAVY, CORAL)
     fig, ax = plt.subplots(figsize=(8.8, 4.9))
-    rng = np.random.default_rng(2026)
+    sample_seeds = sorted(data["sample_seed"].unique())
+    markers = ("o", "s", "^", "D")
     for index, (method, color) in enumerate(zip(methods, colors), start=1):
-        values = 100 * data.loc[data["method"] == method, "accuracy"].to_numpy()
-        jitter = rng.uniform(-0.08, 0.08, len(values))
-        ax.scatter(np.full(len(values), index) + jitter, values, s=42, color=color, alpha=0.75, edgecolor="white")
+        selected_method = data[data["method"] == method]
+        values = 100 * selected_method["accuracy"].to_numpy()
+        for sample_index, sample_seed in enumerate(sample_seeds):
+            selected = selected_method[selected_method["sample_seed"] == sample_seed]
+            sample_values = 100 * selected["accuracy"].to_numpy()
+            offsets = np.linspace(-0.13, 0.13, len(sample_values))
+            ax.scatter(
+                np.full(len(sample_values), index) + offsets,
+                sample_values,
+                s=46,
+                marker=markers[sample_index % len(markers)],
+                color=color,
+                alpha=0.72,
+                edgecolor="white",
+                label=(
+                    f"样本种子 {sample_seed}"
+                    if index == 1
+                    else None
+                ),
+            )
         mean = values.mean()
         std = values.std(ddof=1) if len(values) > 1 else 0
         ax.errorbar(index, mean, yerr=std, fmt="D", color=color, capsize=5, linewidth=2)
@@ -790,15 +937,15 @@ def plot_repeated_validation() -> None:
     ax.axhline(20, color=CORAL, linestyle="--", linewidth=1.1)
     ax.set_xticks(range(1, 4), ["多参数 MHD", "随机森林", "概率融合"])
     ax.set_ylabel("每次完整五折的折外准确率（%）")
-    ax.set_title("五组外层随机种子下的模型稳定性")
+    ax.set_title("三个样本种子 × 五组外层划分下的模型稳定性")
+    ax.legend(frameon=False, ncol=3, loc="lower center")
     clean_axis(ax)
     fig.tight_layout()
     save_figure(fig, "repeated_validation_cn.png")
 
 
 def plot_ablation() -> None:
-    data = pd.read_csv(RAW_TABLES / "feature_ablation.csv")
-    data = data[data["removed_group"] != "none"].copy()
+    data = pd.read_csv(RAW_TABLES / "feature_ablation_repeated.csv")
     group_cn = {
         "scale": "尺度与长度",
         "pitch": "音高统计",
@@ -808,16 +955,33 @@ def plot_ablation() -> None:
         "tonality": "音级与调性",
     }
     data["label"] = data["removed_group"].map(group_cn)
-    change = 100 * data["balanced_accuracy_change"].to_numpy()
+    data = data.sort_values("balanced_accuracy_change_mean")
+    change = 100 * data["balanced_accuracy_change_mean"].to_numpy()
+    error = 100 * data["balanced_accuracy_change_std"].to_numpy()
     colors = [CORAL if value < 0 else TEAL for value in change]
     fig, ax = plt.subplots(figsize=(8.5, 4.8))
     bars = ax.barh(np.arange(len(data)), change, color=colors)
+    ax.errorbar(
+        change,
+        np.arange(len(data)),
+        xerr=error,
+        fmt="none",
+        ecolor=NAVY,
+        capsize=3,
+        linewidth=1.1,
+    )
     ax.axvline(0, color=SLATE, linewidth=1)
     ax.set_yticks(np.arange(len(data)), data["label"])
     ax.set_xlabel("移除该特征组后的平衡准确率变化（百分点）")
-    ax.set_title("随机森林特征组消融：负值表示该组提供有效信息")
+    ax.set_title("五组外层划分下的特征组消融（均值 ± 标准差）")
     for bar, value in zip(bars, change):
-        ax.text(value + (0.12 if value >= 0 else -0.12), bar.get_y() + bar.get_height() / 2, f"{value:+.2f}", va="center", ha="left" if value >= 0 else "right")
+        ax.text(
+            value + (0.18 if value >= 0 else -0.18),
+            bar.get_y() + bar.get_height() / 2,
+            f"{value:+.2f}",
+            va="center",
+            ha="left" if value >= 0 else "right",
+        )
     clean_axis(ax, "x")
     fig.tight_layout()
     save_figure(fig, "feature_ablation_cn.png")
@@ -887,7 +1051,7 @@ def plot_dashboard(summary: dict) -> None:
         )
         ax.text(x + 0.28, 1.62, value, fontsize=23, weight="bold", color=color)
         ax.text(x + 0.28, 1.10, label, fontsize=10.5)
-    ax.text(0.28, 2.86, "v3 核心结果一览", fontsize=17, weight="bold", color=NAVY)
+    ax.text(0.28, 2.86, "核心结果一览", fontsize=17, weight="bold", color=NAVY)
     ax.text(
         11.72,
         2.87,
@@ -920,7 +1084,7 @@ def main() -> None:
 
     export_tables(summary, dataset, prediction_assets)
     plot_data_funnel(summary)
-    plot_method_taxonomy()
+    method_metadata = preserve_method_taxonomy()
     plot_dashboard(summary)
     plot_example_curves(dataset)
     plot_synthetic()
@@ -930,10 +1094,12 @@ def main() -> None:
     plot_confusions(labels, primary_predictions)
     plot_mds(matrices["mhd_tpv"], labels)
     plot_feature_importance(prediction_assets)
+    plot_group_importance()
     plot_sensitivity()
     plot_repeated_validation()
     plot_ablation()
     plot_fusion_complementarity(labels, primary_predictions)
+    print(f"[paper-assets] preserved method figure: {method_metadata['sha256']}")
     print(f"[paper-assets] figures: {PAPER_FIGURES}")
     print(f"[paper-assets] tables: {PAPER_TABLES}")
 
